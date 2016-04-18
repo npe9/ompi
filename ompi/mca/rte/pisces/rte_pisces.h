@@ -30,7 +30,7 @@ typedef struct
 	int jobid;
 } ompi_process_name_t;
 
-ompi_process_name_t *cur;
+extern ompi_process_name_t cur;
 
 #include "ompi/mca/rte/rte.h"
 
@@ -45,7 +45,7 @@ typedef struct {
 	int pid;
 } ompi_process_info_t;
 
-ompi_process_info_t ompi_process_info;
+extern ompi_process_info_t ompi_process_info;
 
 typedef struct {
 	ompi_rte_component_t super;
@@ -76,7 +76,7 @@ int ompi_rte_proc_is_bound;
 ompi_process_name_t *orte_proc_applied_binding;
 void ompi_rte_abort(int, char*, ...);
 
-#define OMPI_PROC_MY_NAME cur
+#define OMPI_PROC_MY_NAME ((ompi_process_name_t*)&cur)
 int OMPI_NAME_PRINT(ompi_process_name_t*);
 int ompi_rte_compare_name_fields(ompi_rte_cmp_bitmask_t, const ompi_process_name_t*, const ompi_process_name_t*);
 int ompi_rte_abort_peers(ompi_process_name_t*, int, int);

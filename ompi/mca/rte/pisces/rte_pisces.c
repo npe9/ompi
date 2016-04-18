@@ -3,6 +3,12 @@
 #include <stdio.h>
 #include "rte_pisces.h"
 
+#include "opal/mca/pmix/base/base.h"
+#include "opal/mca/pmix/pmix.h"
+
+ompi_process_name_t cur;
+ompi_process_info_t ompi_process_info;
+
 int ompi_rte_compare_name_fields(ompi_rte_cmp_bitmask_t mask, const ompi_process_name_t *name1, const ompi_process_name_t *name2) {
 	printf("%s: %x %s %s\n", __func__, mask, name1, name2);
 	return strcmp(name1,name2);
@@ -60,13 +66,23 @@ int ompi_rte_convert_process_name_to_string(char **str,  const ompi_process_name
 int ompi_rte_init(int *argc, char ***argv)
 {
 	int i;
-
-	printf("%s: *argc %d", __func__, argc);
-	for(i = 0; i < *argc; i++) {
-		printf(" %s", *argv[i]);
+	
+	printf("%s: %p",__func__, argc);
+	if(argc){
+		printf(" *argc %d", *argc);
+		for(i = 0; i < *argc; i++) {
+			printf(" %s", *argv[i]);
+		}
 	}
 	printf("\n");
-	return 1;
+	ompi_process_info.nodename = "pisces-null";
+    /*  
+	printf("%s: setting pmix",__func__);
+	if (OPAL_SUCCESS != opal_pmix_base_select())
+		return 1;
+	printf("%s: pmix set: %p",__func__, opal_pmix);
+	*/
+	return 0;
 }
 
 int ompi_rte_finalize(void)
