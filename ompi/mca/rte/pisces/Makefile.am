@@ -25,6 +25,7 @@ component_install =
 endif
 
 local_sources = \
+			rte_pisces.c \
 			rte_pisces_component.c \
 			rte_pisces_module.c
 

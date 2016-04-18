@@ -22,7 +22,6 @@
 
 #include "ompi_config.h"
 #include "ompi/constants.h"
-
 #include "opal/threads/condition.h"
 
 typedef struct
@@ -32,6 +31,8 @@ typedef struct
 } ompi_process_name_t;
 
 ompi_process_name_t *cur;
+
+#include "ompi/mca/rte/rte.h"
 
 typedef struct {
 	char *job_session_dir;
@@ -77,7 +78,7 @@ void ompi_rte_abort(int, char*, ...);
 
 #define OMPI_PROC_MY_NAME cur
 int OMPI_NAME_PRINT(ompi_process_name_t*);
-int ompi_rte_compare_name_fields(ompi_rte_cmp_bitmask_t mask, const ompi_process_name_t *name1, const ompi_process_name_t *name2);
+int ompi_rte_compare_name_fields(ompi_rte_cmp_bitmask_t, const ompi_process_name_t*, const ompi_process_name_t*);
 int ompi_rte_abort_peers(ompi_process_name_t*, int, int);
 int ompi_rte_convert_string_to_process_name(ompi_process_name_t*, const char*);
 int ompi_rte_convert_process_name_to_string(char**,  const ompi_process_name_t*);
