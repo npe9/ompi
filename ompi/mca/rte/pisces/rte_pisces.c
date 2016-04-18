@@ -8,6 +8,7 @@
 
 ompi_process_name_t cur;
 ompi_process_info_t ompi_process_info;
+opal_pmix_base_module_t opal_pmix;
 
 int ompi_rte_compare_name_fields(ompi_rte_cmp_bitmask_t mask, const ompi_process_name_t *name1, const ompi_process_name_t *name2) {
 	printf("%s: %x %s %s\n", __func__, mask, name1, name2);
@@ -75,13 +76,17 @@ int ompi_rte_init(int *argc, char ***argv)
 		}
 	}
 	printf("\n");
+	/*  open and setup pmix */
+	if (OPAL_SUCCESS != mca_base_framework_open(&opal_pmix_base_framework, 0)) {
+		printf("%s: error opening pmix\n",__func__);
+		return 1;
+	}
 	ompi_process_info.nodename = "pisces-null";
-    /*  
 	printf("%s: setting pmix",__func__);
 	if (OPAL_SUCCESS != opal_pmix_base_select())
 		return 1;
 	printf("%s: pmix set: %p",__func__, opal_pmix);
-	*/
+	
 	return 0;
 }
 
