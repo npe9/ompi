@@ -23,7 +23,9 @@
 #include "ompi_config.h"
 #include "ompi/constants.h"
 
-typedef struct ompi_process_name_t
+#include "opal/threads/condition.h"
+
+typedef struct
 {
 	int vpid;
 	int jobid;
@@ -31,8 +33,7 @@ typedef struct ompi_process_name_t
 
 ompi_process_name_t *cur;
 
-typedef struct ompi_process_info_t
-{
+typedef struct {
 	char *job_session_dir;
 	char *proc_session_dir;
 	char *nodename;
@@ -45,10 +46,23 @@ typedef struct ompi_process_info_t
 
 ompi_process_info_t ompi_process_info;
 
+typedef struct {
+	ompi_rte_component_t super;
+	opal_mutex_t lock;
+	opal_list_t modx_reqs;
+} ompi_rte_pisces_component_t;
+
+typedef struct {
+	opal_list_item_t super;
+	opal_mutex_t lock;
+	opal_condition_t cond;
+	bool active;
+	ompi_process_name_t peer;
+} ompi_pisces_tracker_t;
+
 typedef int ompi_rte_cmp_bitmask_t;
 typedef int ompi_jobid_t;
 typedef int ompi_vpid_t;
-
 #define OMPI_NAME 1
 
 int OMPI_LOCAL_JOBID(int);
@@ -59,7 +73,7 @@ int OMPI_PROCESS_NAME_NTOH(ompi_process_name_t);
 
 int ompi_rte_proc_is_bound;
 ompi_process_name_t *orte_proc_applied_binding;
-int ompi_rte_abort(int, char*, ...);
+void ompi_rte_abort(int, char*, ...);
 
 #define OMPI_PROC_MY_NAME cur
 int OMPI_NAME_PRINT(ompi_process_name_t*);

@@ -25,6 +25,8 @@ component_install =
 endif
 
 local_sources = \
+			rte_pisces_component.c \
+			rte_pisces_module.c
 
 mcacomponentdir = $(ompilibdir)
 mcacomponent_LTLIBRARIES = $(component_install)

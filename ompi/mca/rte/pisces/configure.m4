@@ -41,7 +41,7 @@ AC_DEFUN([MCA_ompi_rte_pisces_CONFIG],[
         AC_HELP_STRING([--with-pisces],
                        [Use PISCES run-time environment (default: yes)]))
     AS_IF([test "$with_pisces" != "no"],
-          [$1, AM_CONDITIONAL([OMPI_RTE_ORTE], false)],
+          [$1],
           [AC_MSG_NOTICE([PISCES disabled by user])
            $2])
 ])
