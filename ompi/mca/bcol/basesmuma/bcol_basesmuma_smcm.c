@@ -183,8 +183,8 @@ int bcol_basesmuma_smcm_allgather_connection(
        preparing this list from the sbgp-ing module that was passed into the function */
 
     /* fill in local file information */
-    local_file.vpid  = ((orte_process_name_t*)&my_id->super.proc_name)->vpid;
-    local_file.jobid = ((orte_process_name_t*)&my_id->super.proc_name)->jobid;
+    local_file.vpid  = ((ompi_process_name_t*)&my_id->super.proc_name)->vpid;
+    local_file.jobid = ((ompi_process_name_t*)&my_id->super.proc_name)->jobid;
     local_file.file_size=input.size;
     local_file.size_ctl_structure=input.size_ctl_structure;
     local_file.data_seg_alignment=input.data_seg_alignment;

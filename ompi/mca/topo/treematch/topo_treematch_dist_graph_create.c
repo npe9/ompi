@@ -868,8 +868,8 @@ int mca_topo_treematch_dist_graph_create(mca_topo_base_module_t* topo_module,
         hwloc_err = hwloc_set_cpubind(opal_hwloc_topology,set,0);
         if( -1 == hwloc_err) goto fallback;
 
-        /* Report new binding to ORTE/OPAL */
-        /*	hwloc_bitmap_list_asprintf(&orte_process_info.cpuset,set);   */
+        /* Report new binding to RTE/OPAL */
+        /*	hwloc_bitmap_list_asprintf(&ompi_process_info.cpuset,set);   */
         err = hwloc_bitmap_snprintf (set_as_string,64,set);
 
 #ifdef __DEBUG__
@@ -881,16 +881,16 @@ int mca_topo_treematch_dist_graph_create(mca_topo_base_module_t* topo_module,
         kv.type = OPAL_STRING;
         kv.data.string = strdup(set_as_string);
 
-        (void)opal_pmix.store_local((opal_process_name_t*)ORTE_PROC_MY_NAME, &kv);
+        (void)opal_pmix.store_local((opal_process_name_t*)OMPI_PROC_MY_NAME, &kv);
         OBJ_DESTRUCT(&kv);
 
         locality = opal_hwloc_base_get_relative_locality(opal_hwloc_topology,
-                                                         orte_process_info.cpuset,set_as_string);
+                                                         ompi_process_info.cpuset,set_as_string);
         OBJ_CONSTRUCT(&kv, opal_value_t);
         kv.key = strdup(OPAL_PMIX_LOCALITY);
         kv.type = OPAL_UINT16;
         kv.data.uint16 = locality;
-        (void)opal_pmix.store_local((opal_process_name_t*)ORTE_PROC_MY_NAME, &kv);
+        (void)opal_pmix.store_local((opal_process_name_t*)OMPI_PROC_MY_NAME, &kv);
         OBJ_DESTRUCT(&kv);
 
         if( OMPI_SUCCESS != (err = ompi_comm_create(comm_old,

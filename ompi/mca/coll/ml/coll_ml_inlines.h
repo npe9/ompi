@@ -110,7 +110,7 @@ static inline  __opal_attribute_always_inline__ int coll_ml_fragment_completion_
                 ML_VERBOSE(10, ("unpack done"));
                 ready_to_release = true;
                 break;
-            case ORTE_ERR_NO_MATCH_YET:
+            case OMPI_ERR_NO_MATCH_YET:
                 ML_VERBOSE(10, ("unexpected packet"));
                 ready_to_release = false;
                 break;

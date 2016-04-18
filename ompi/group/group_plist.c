@@ -23,6 +23,7 @@
  * $HEADER$
  */
 
+#include "opal/class/opal_bitmap.h"
 #include "ompi_config.h"
 #include "ompi/group/group.h"
 #include "ompi/constants.h"

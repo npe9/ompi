@@ -104,7 +104,7 @@ static int mca_coll_ml_bcast_converter_unpack_data(mca_coll_ml_collective_operat
                     coll_op->fragment_data.buffer_desc->buffer_index,
                     coll_op->fragment_data.message_descriptor->next_expected_index,
                     prev_coll_op->fragment_data.buffer_desc->buffer_index));
-        return ORTE_ERR_NO_MATCH_YET;
+        return OMPI_ERR_NO_MATCH_YET;
     }
 
     do {
