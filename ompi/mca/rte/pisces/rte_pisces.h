@@ -46,6 +46,7 @@ typedef struct {
 } ompi_process_info_t;
 
 extern ompi_process_info_t ompi_process_info;
+extern opal_event_base_t *pisces_event_base;
 
 typedef struct {
 	ompi_rte_component_t super;

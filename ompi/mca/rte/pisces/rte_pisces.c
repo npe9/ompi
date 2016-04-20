@@ -5,10 +5,12 @@
 
 #include "opal/mca/pmix/base/base.h"
 #include "opal/mca/pmix/pmix.h"
+#include "opal/runtime/opal_progress_threads.h"
 
 ompi_process_name_t cur;
 ompi_process_info_t ompi_process_info;
 opal_pmix_base_module_t opal_pmix;
+opal_event_base_t *pisces_event_base;
 
 int ompi_rte_compare_name_fields(ompi_rte_cmp_bitmask_t mask, const ompi_process_name_t *name1, const ompi_process_name_t *name2) {
 	printf("%s: %x %s %s\n", __func__, mask, name1, name2);
@@ -76,6 +78,11 @@ int ompi_rte_init(int *argc, char ***argv)
 		}
 	}
 	printf("\n");
+	if (OPAL_SUCCESS != opal_init(&argc, &argv)) {
+		exit(1);
+	}
+	pisces_event_base = opal_progress_thread_init(NULL);
+
 	/*  open and setup pmix */
 	if (OPAL_SUCCESS != mca_base_framework_open(&opal_pmix_base_framework, 0)) {
 		printf("%s: error opening pmix\n",__func__);
@@ -86,7 +93,8 @@ int ompi_rte_init(int *argc, char ***argv)
 	if (OPAL_SUCCESS != opal_pmix_base_select())
 		return 1;
 	printf("%s: pmix set: %p",__func__, opal_pmix);
-	
+	opal_pmix_base_set_evbase(pisces_event_base);
+
 	return 0;
 }
 
