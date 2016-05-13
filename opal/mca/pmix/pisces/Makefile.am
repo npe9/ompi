@@ -27,8 +27,10 @@ endif
 mcacomponentdir = $(opallibdir)
 mcacomponent_LTLIBRARIES = $(component_install)
 mca_pmix_pisces_la_SOURCES = $(sources)
-mca_pmix_pisces_la_LDFLAGS = -module -avoid-version
+mca_pmix_pisces_la_LIBADD = -lhobbes
+mca_pmix_pisces_la_LDFLAGS = -module -avoid-version -L/home/npe/src/nvl.me/src/guests/simple_busybox/src/pisces/hobbes/libhobbes
 
 noinst_LTLIBRARIES = $(component_noinst)
 libmca_pmix_pisces_la_SOURCES =$(sources)
-libmca_pmix_pisces_la_LDFLAGS = -module -avoid-version
+mca_pmix_pisces_la_LIBADD = -lhobbes
+libmca_pmix_pisces_la_LDFLAGS = -module -avoid-version -L/home/npe/src/nvl.me/src/guests/simple_busybox/src/pisces/hobbes/libhobbes

@@ -31,11 +31,13 @@ local_sources = \
 
 mcacomponentdir = $(ompilibdir)
 mcacomponent_LTLIBRARIES = $(component_install)
+mca_rte_pisces_la_CFLAGS = -I /home/npe/src/nvl.me/src/guests/simple_busybox/src/pisces/xpmem/include
 mca_rte_pisces_la_SOURCES = $(local_sources)
 mca_rte_pisces_la_LIBADD = $(rte_pisces_LIBS)
 mca_rte_pisces_la_LDFLAGS = -module -avoid-version $(rte_pisces_LDFLAGS)
 
 noinst_LTLIBRARIES = $(component_noinst)
+libmca_rte_pisces_la_CFLAGS = -I /home/npe/src/nvl.me/src/guests/simple_busybox/src/pisces/xpmem/include
 libmca_rte_pisces_la_SOURCES = $(local_sources)
 libmca_rte_pisces_la_LIBADD = $(rte_pisces_LIBS)
 libmca_rte_pisces_la_LDFLAGS = -module -avoid-version $(rte_pisces_LDFLAGS)

@@ -26,8 +26,8 @@
 
 typedef struct
 {
-	int vpid;
-	int jobid;
+	uint32_t jobid;
+	uint32_t vpid;
 } ompi_process_name_t;
 
 extern ompi_process_name_t cur;

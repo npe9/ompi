@@ -118,11 +118,14 @@ static opal_process_name_t pisces_pname;
 
 static int pisces_init(void)
 {
-    int rc;
+    int rc, spawned;
     opal_value_t kv;
 
     ++pisces_init_count;
 
+    printf("%s: initing\n", __func__);
+    //if(PMI_Init(&spawned) == PMI_FAIL)
+    //    goto err_exit;
     /* store our name in the opal_proc_t so that
      * debug messages will make sense - an upper
      * layer will eventually overwrite it, but that
@@ -248,6 +251,7 @@ err_exit:
 
 static int pisces_fini(void)
 {
+    printf("%s: finalizing\n", __func__);
     if (0 == pisces_init_count) {
         return OPAL_SUCCESS;
     }
@@ -261,6 +265,7 @@ static int pisces_fini(void)
 
 static int pisces_initialized(void)
 {
+    printf("%s: \n", __func__);
     if (0 < pisces_init_count) {
         return 1;
     }
@@ -270,11 +275,13 @@ static int pisces_initialized(void)
 static int pisces_abort(int flag, const char *msg,
                       opal_list_t *procs)
 {
+    printf("%s: aborting\n", __func__);
     return OPAL_SUCCESS;
 }
 
 static int pisces_spawn(opal_list_t *jobinfo, opal_list_t *apps, opal_jobid_t *jobid)
 {
+    printf("%s: spawning\n", __func__);
     return OPAL_ERR_NOT_SUPPORTED;
 }
 
@@ -282,16 +289,19 @@ static int pisces_spawn_nb(opal_list_t *jobinfo, opal_list_t *apps,
                          opal_pmix_spawn_cbfunc_t cbfunc,
                          void *cbdata)
 {
+    printf("%s: spawn_nbing\n", __func__);
     return OPAL_ERR_NOT_SUPPORTED;
 }
 
 static int pisces_job_connect(opal_list_t *procs)
 {
+    printf("%s: job connecting\n", __func__);
     return OPAL_ERR_NOT_SUPPORTED;
 }
 
 static int pisces_job_disconnect(opal_list_t *procs)
 {
+    printf("%s: disconnecting\n", __func__);
     return OPAL_ERR_NOT_SUPPORTED;
 }
 
@@ -299,6 +309,8 @@ static int pisces_job_disconnect_nb(opal_list_t *procs,
                                   opal_pmix_op_cbfunc_t cbfunc,
                                   void *cbdata)
 {
+    printf("%s: disconnecting\n", __func__);
+
     return OPAL_ERR_NOT_SUPPORTED;
 }
 
@@ -306,11 +318,13 @@ static int pisces_resolve_peers(const char *nodename,
                               opal_jobid_t jobid,
                               opal_list_t *procs)
 {
+    printf("%s: \n", __func__);
     return OPAL_ERR_NOT_IMPLEMENTED;
 }
 
 static int pisces_resolve_nodes(opal_jobid_t jobid, char **nodelist)
 {
+    printf("%s: resolving \n", __func__);
     return OPAL_ERR_NOT_IMPLEMENTED;
 }
 
@@ -319,14 +333,17 @@ static int pisces_put(opal_pmix_scope_t scope,
 {
     int rc;
 
+    printf("%s: putting\n", __func__);
     opal_output_verbose(10, opal_pmix_base_framework.framework_output,
                         "%s pmix:pisces pisces_put key %s scope %d\n",
                          OPAL_NAME_PRINT(OPAL_PROC_MY_NAME), kv->key, scope);
 
     if (!pisces_init_count) {
+        printf("%s: init_count = 0\n", __func__);
         return OPAL_ERROR;
     }
-
+    //if(PMI_KVS_Put(&pisces_pname, kv->key, kv->val) == PMI_FAIL)
+    //    return OPAL_FAIL;
     rc = opal_pmix_base_store(&pisces_pname, kv);
 
     return rc;
@@ -334,17 +351,23 @@ static int pisces_put(opal_pmix_scope_t scope,
 
 static int pisces_commit(void)
 {
+    printf("%s: commiting\n", __func__);
     return OPAL_SUCCESS;
 }
 
 static int pisces_fence(opal_list_t *procs, int collect_data)
 {
+    printf("%s: fencing\n", __func__);
+
+
     return OPAL_SUCCESS;
 }
 
 static int pisces_fence_nb(opal_list_t *procs, int collect_data,
                          opal_pmix_op_cbfunc_t cbfunc, void *cbdata)
 {
+    printf("%s: fencing non block\n", __func__);
+
     return OPAL_ERR_NOT_IMPLEMENTED;
 }
 
@@ -355,13 +378,21 @@ static int pisces_get(const opal_process_name_t *id,
     int rc;
     opal_list_t vals;
 
+    printf("%s: %p getting %s\n", __func__, id, key);
+    //printf("%s pmix:pisces getting value for proc %s key %s",
+    //                    OPAL_NAME_PRINT(OPAL_PROC_MY_NAME),
+    //                    OPAL_NAME_PRINT(*id), key);
+
+
     opal_output_verbose(2, opal_pmix_base_framework.framework_output,
                         "%s pmix:pisces getting value for proc %s key %s",
                         OPAL_NAME_PRINT(OPAL_PROC_MY_NAME),
                         OPAL_NAME_PRINT(*id), key);
 
     OBJ_CONSTRUCT(&vals, opal_list_t);
+    printf("%s: fetching\n", __func__);
     rc = opal_pmix_base_fetch(id, key, &vals);
+    printf("%s: fetch results %d\n", __func__, rc);
     if (OPAL_SUCCESS == rc) {
         *kv = (opal_value_t*)opal_list_remove_first(&vals);
         return OPAL_SUCCESS;
@@ -377,50 +408,65 @@ static int pisces_get(const opal_process_name_t *id,
 static int pisces_get_nb(const opal_process_name_t *id, const char *key,
                        opal_list_t *info, opal_pmix_value_cbfunc_t cbfunc, void *cbdata)
 {
+    printf("%s: getting notblock\n", __func__);
     return OPAL_ERR_NOT_IMPLEMENTED;
 }
 
 static int pisces_publish(opal_list_t *info)
 {
+    printf("%s: putting\n", __func__);
+ 
     return OPAL_ERR_NOT_SUPPORTED;
 }
 
 static int pisces_publish_nb(opal_list_t *info,
                            opal_pmix_op_cbfunc_t cbfunc, void *cbdata)
 {
+    printf("%s: publishing nonblocking\n", __func__);
+
     return OPAL_ERR_NOT_SUPPORTED;
 }
 
 static int pisces_lookup(opal_list_t *data, opal_list_t *info)
 {
+    printf("%s: looking up\n", __func__);
     return OPAL_ERR_NOT_SUPPORTED;
 }
 
 static int pisces_lookup_nb(char **keys, opal_list_t *info,
                           opal_pmix_lookup_cbfunc_t cbfunc, void *cbdata)
 {
+    printf("%s: lookup nonblocking\n", __func__);
+
     return OPAL_ERR_NOT_SUPPORTED;
 }
 
 static int pisces_unpublish(char **keys, opal_list_t *info)
 {
+    printf("%s: unpublishing\n", __func__);
+
     return OPAL_ERR_NOT_SUPPORTED;
 }
 
 static int pisces_unpublish_nb(char **keys, opal_list_t *info,
                             opal_pmix_op_cbfunc_t cbfunc, void *cbdata)
 {
+    printf("%s: publishing nonblocking\n", __func__);
+
     return OPAL_ERR_NOT_SUPPORTED;
 }
 
 static const char *pisces_get_version(void)
 {
+    printf("%s: getting version\n", __func__);
     return "N/A";
 }
 
 static int pisces_store_local(const opal_process_name_t *proc,
                           opal_value_t *val)
 {
+    printf("%s: storing local\n", __func__);
+
     opal_pmix_base_store(proc, val);
 
     return OPAL_SUCCESS;
@@ -428,11 +474,15 @@ static int pisces_store_local(const opal_process_name_t *proc,
 
 static const char *pisces_get_nspace(opal_jobid_t jobid)
 {
+    printf("%s: getting nspace\n", __func__);
+
     return "N/A";
 }
 
 static void pisces_register_jobid(opal_jobid_t jobid, const char *nspace)
 {
+    printf("%s: registering jobid\n", __func__);
+
     return;
 }
 
