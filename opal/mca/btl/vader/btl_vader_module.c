@@ -170,15 +170,23 @@ static int init_vader_endpoint (struct mca_btl_base_endpoint_t *ep, struct opal_
 #if OPAL_BTL_VADER_HAVE_XPMEM
         if (MCA_BTL_VADER_XPMEM == mca_btl_vader_component.single_copy_mechanism) {
             /* always use xpmem if it is available */
+            printf("%s: we are single copy seg_id %lx\n", __func__, modex->xpmem.seg_id);
             ep->segment_data.xpmem.apid = xpmem_get (modex->xpmem.seg_id, XPMEM_RDWR, XPMEM_PERMIT_MODE, (void *) 0666);
+			if(ep->segment_data.xpmem.apid == -1){
+				printf("%s: bad apid for modex->xpmem.seg_id %d\n", __func__, modex->xpmem.seg_id);
+				return OPAL_ERROR;
+			}
             ep->segment_data.xpmem.vma_module = mca_rcache_base_vma_module_alloc ();
             (void) vader_get_registation (ep, modex->xpmem.segment_base, mca_btl_vader_component.segment_size,
                                           MCA_RCACHE_FLAGS_PERSIST, (void **) &ep->segment_base);
+            printf("%s: xpmem lookup segment_base %lx\n", __func__, modex->xpmem.segment_base);
         } else {
 #endif
+            printf("%s: storing segment copy\n", __func__);
             /* store a copy of the segment information for detach */
             ep->segment_data.other.seg_ds = malloc (msg_size);
             if (NULL == ep->segment_data.other.seg_ds) {
+                printf("%s: out of resource\n", __func__);
                 return OPAL_ERR_OUT_OF_RESOURCE;
             }
 

@@ -104,16 +104,18 @@ void ompi_proc_destruct(ompi_proc_t* proc)
  * the process list and hash table.
  */
 static int ompi_proc_allocate (ompi_jobid_t jobid, ompi_vpid_t vpid, ompi_proc_t **procp) {
+    int ret;
     ompi_proc_t *proc = OBJ_NEW(ompi_proc_t);
 
+    printf("%s: jobid %d vpid %d\n", __func__, jobid, vpid);
     opal_list_append(&ompi_proc_list, (opal_list_item_t*)proc);
 
     OMPI_CAST_RTE_NAME(&proc->super.proc_name)->jobid = jobid;
     OMPI_CAST_RTE_NAME(&proc->super.proc_name)->vpid = vpid;
 
-    opal_hash_table_set_value_ptr (&ompi_proc_hash, &proc->super.proc_name, sizeof (proc->super.proc_name),
+    ret = opal_hash_table_set_value_ptr (&ompi_proc_hash, &proc->super.proc_name, sizeof (proc->super.proc_name),
                                    proc);
-
+    printf("%s: tried to add to hash table %p, got %d wanted %d\n", __func__, &ompi_proc_hash, ret, OPAL_SUCCESS);
     *procp = proc;
 
     return OMPI_SUCCESS;
@@ -144,10 +146,13 @@ int ompi_proc_complete_init_single (ompi_proc_t *proc)
 
     /* get the locality information - all RTEs are required
      * to provide this information at startup */
+    printf("%s: getting locality\n", __func__);
     OPAL_MODEX_RECV_VALUE_OPTIONAL(ret, OPAL_PMIX_LOCALITY, &proc->super.proc_name, &u16ptr, OPAL_UINT16);
     if (OPAL_SUCCESS != ret) {
+        printf("%s: couldn't get locality\n", __func__);
         proc->super.proc_flags = OPAL_PROC_NON_LOCAL;
     } else {
+        printf("%s: is local %d\n", __func__, u16);
         proc->super.proc_flags = u16;
     }
 
