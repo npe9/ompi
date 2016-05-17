@@ -359,7 +359,7 @@ static int pisces_fence(opal_list_t *procs, int collect_data)
 {
     printf("%s: fencing\n", __func__);
 
-
+    sleep(10);
     return OPAL_SUCCESS;
 }
 
@@ -368,6 +368,7 @@ static int pisces_fence_nb(opal_list_t *procs, int collect_data,
 {
     printf("%s: fencing non block\n", __func__);
 
+    sleep(5);
     return OPAL_ERR_NOT_IMPLEMENTED;
 }
 

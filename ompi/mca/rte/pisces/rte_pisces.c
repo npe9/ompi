@@ -129,12 +129,15 @@ int ompi_rte_init(int *argc, char ***argv)
 	//ompi_mpi_comm_world.comm.c_my_rank = rank;
 //	ompi_mpi_comm_world.comm.c_local_group->grp_my_rank = rank;
 	printf("\n");
+	printf("%s: opal_init\n", __func__);
 	if (OPAL_SUCCESS != opal_init(&argc, &argv)) {
 		exit(1);
 	}
+	printf("%s: progress_thread_init\n", __func__);
 	pisces_event_base = opal_progress_thread_init(NULL);
 
 	/*  open and setup pmix */
+	printf("%s: opening pmix\n", __func__);
 	if (OPAL_SUCCESS != mca_base_framework_open(&opal_pmix_base_framework, 0)) {
 		printf("%s: error opening pmix\n",__func__);
 		return 1;
@@ -168,7 +171,7 @@ int ompi_rte_init(int *argc, char ***argv)
 		uint64_t ind[3] = { 8589934635, 12884901932, 17179869229};
 		uint64_t base[3] = { 0x0000008000000000, 0x0000010000000000, 0x0000018000000000};
 		//uint64_t seg_base[3] = { 0x8007950000, 0x10007950000, 0x18007950000};
-		uint64_t seg_base[3] = { 0x8007951000, 0x1000f951000, 0x1800f951000};
+		uint64_t seg_base[3] = { 0x8007956000, 0x1000f956000, 0x1800f956000};
 		faker.xpmem.seg_id = ind[i];
 		//faker.xpmem.seg_id = *(uint64_t*)(((slot + 1) << SMARTMAP_SHIFT) | ((unsigned long)&mca_btl_vader_component.my_seg_id));
 		printf("%s: set seg_id to %ld from addr %lx\n", __func__, faker.xpmem.seg_id, (uint64_t*)((((slot + 1) << SMARTMAP_SHIFT) | ((unsigned long)&mca_btl_vader_component.my_seg_id))));
