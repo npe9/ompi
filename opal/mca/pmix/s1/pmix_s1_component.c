@@ -90,12 +90,13 @@ static int pmix_s1_component_register(void)
 static int pmix_s1_component_query(mca_base_module_t **module, int *priority)
 {
     /* disqualify ourselves if we are not under slurm */
+    /*
     if (NULL == getenv("SLURM_STEP_NUM_TASKS")) {
         *priority = 0;
         *module = NULL;
         return OPAL_ERROR;
     }
-
+    */
     /* we can be considered, but set our priority by default
      * to be less than s2 */
     *priority = mca_pmix_s1_component.priority;

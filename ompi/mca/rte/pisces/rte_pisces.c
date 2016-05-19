@@ -9,6 +9,7 @@
 #include "opal/mca/btl/base/base.h"
 #include "opal/mca/btl/vader/btl_vader.h"
 #include "opal/util/proc.h"
+#include "opal/util/output.h"
 #include "opal/runtime/opal_progress_threads.h"
 #include "ompi/communicator/communicator.h"
 
@@ -21,7 +22,7 @@ opal_event_base_t *pisces_event_base;
 
 int ompi_rte_compare_name_fields(ompi_rte_cmp_bitmask_t mask, const ompi_process_name_t *name1, const ompi_process_name_t *name2) {
 	int ret;
-	printf("%s: %x name1 vpid %d jobid %d name2 vpid %d jobid %d\n", __func__, mask, name1->vpid, name1->jobid, name2->vpid, name2->jobid);
+	//printf("%s: %x name1 vpid %d jobid %d name2 vpid %d jobid %d\n", __func__, mask, name1->vpid, name1->jobid, name2->vpid, name2->jobid);
 	if(name1->jobid > name2->jobid)
 		return 1;
 	if(name1->jobid < name2->jobid)
@@ -39,13 +40,14 @@ int ompi_rte_compare_name_fields(ompi_rte_cmp_bitmask_t mask, const ompi_process
 }
 
 int OMPI_NAME_PRINT(ompi_process_name_t *name) {
-	printf("%s: vpid %d jobid %d\n", __func__, name->vpid, name->jobid);
+	//printf("%s: vpid %d jobid %d\n", __func__, name->vpid, name->jobid);
+
 	return 1;
 }
 
 int OMPI_CONSTRUCT_JOBID(int family, int job)
 {
-	printf("%s: %d %d\n", __func__, family, job);
+	//printf("%s: %d %d\n", __func__, family, job);
 	return family&(0xffff0000)|job&(0xffff);
 }
 
@@ -90,11 +92,19 @@ int ompi_rte_convert_process_name_to_string(char **str,  const ompi_process_name
 
 int ompi_rte_init(int *argc, char ***argv)
 {
-	int i, rank, size, ret;
+	int i, rank, size, ret, fd;
 	char *rankstr, *sizestr;
 	opal_value_t *kv;
 	opal_process_name_t name;
+	opal_output_stream_t lds;
 
+	OBJ_CONSTRUCT(&lds, opal_output_stream_t);
+	lds.lds_want_stdout = true;
+	fd = opal_output_open(&lds);
+	OBJ_DESTRUCT(&lds);
+	opal_output(fd, "TESTING TESTING\n");
+
+	opal_output_set_verbosity(opal_pmix_base_framework.framework_output, MCA_BASE_VERBOSE_MAX);
 	rankstr = getenv("PMI_RANK");
 	rank = atoi(rankstr);
 	if(rankstr == NULL){
@@ -168,17 +178,18 @@ int ompi_rte_init(int *argc, char ***argv)
 #define SMARTMAP_SHIFT 39
 
 		printf("%s: making smartmap addr in pid %d at %lx addr is: %lx\n", __func__, source_pid, &mca_btl_vader_component.my_seg_id, (((slot + 1) << SMARTMAP_SHIFT) | ((unsigned long)&mca_btl_vader_component.my_seg_id)));
-		uint64_t ind[3] = { 8589934635, 12884901932, 17179869229};
+		//uint64_t ind[3] = { 8589934635, 12884901932, 17179869229};
 		uint64_t base[3] = { 0x0000008000000000, 0x0000010000000000, 0x0000018000000000};
 		//uint64_t seg_base[3] = { 0x8007950000, 0x10007950000, 0x18007950000};
-		uint64_t seg_base[3] = { 0x8007956000, 0x1000f956000, 0x1800f956000};
-		faker.xpmem.seg_id = ind[i];
+		// uint64_t seg_base[3] = { 0x8007972000, 0x1000f972000, 0x1800f972000};
+		//faker.xpmem.seg_id = ind[i];
 		//faker.xpmem.seg_id = *(uint64_t*)(((slot + 1) << SMARTMAP_SHIFT) | ((unsigned long)&mca_btl_vader_component.my_seg_id));
 		printf("%s: set seg_id to %ld from addr %lx\n", __func__, faker.xpmem.seg_id, (uint64_t*)((((slot + 1) << SMARTMAP_SHIFT) | ((unsigned long)&mca_btl_vader_component.my_seg_id))));
 		//faker.xpmem.segment_base = 0xbf7900;
-		faker.xpmem.segment_base = seg_base[i];
-		printf("%s: set segment_base to %lx\n", __func__, faker.xpmem.segment_base);
+		//faker.xpmem.segment_base = seg_base[i];
+		//printf("%s: set segment_base to %lx\n", __func__, faker.xpmem.segment_base);
 
+		//if(rank == 0){
 		kv = OBJ_NEW(opal_value_t);
 		kv->key = strdup(OPAL_PMIX_LOCALITY);
 		kv->type = OPAL_UINT16;
@@ -192,13 +203,15 @@ int ompi_rte_init(int *argc, char ***argv)
 		kv->type = OPAL_STRING;
 		kv->data.string = strdup("enclave-1");
 		opal_pmix.store_local(&name, kv);
-
+		//}
+/*
 		kv = OBJ_NEW(opal_value_t);
 		kv->key = strdup("btl.vader.3.0");
 		kv->type = OPAL_BYTE_OBJECT;
 		kv->data.bo.bytes = &faker;
 		kv->data.bo.size = sizeof(faker);
 		opal_pmix.store_local(&name, kv);
+*/
 	}
 	return 0;
 }
