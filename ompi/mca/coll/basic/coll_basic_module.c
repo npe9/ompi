@@ -87,7 +87,7 @@ mca_coll_basic_comm_query(struct ompi_communicator_t *comm,
         basic_module->super.coll_scan       = NULL;
         basic_module->super.coll_scatter    = mca_coll_basic_scatter_inter;
         basic_module->super.coll_scatterv   = mca_coll_basic_scatterv_inter;
-    } else if (ompi_comm_size(comm) <= mca_coll_basic_crossover) {
+    } else if (ompi_comm_size(comm) <= mca_coll_basic_crossover+64) {
         basic_module->super.coll_allgather  = ompi_coll_base_allgather_intra_basic_linear;
         basic_module->super.coll_allgatherv = ompi_coll_base_allgatherv_intra_basic_default;
         basic_module->super.coll_allreduce  = mca_coll_basic_allreduce_intra;
