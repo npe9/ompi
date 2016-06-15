@@ -115,17 +115,32 @@ const opal_pmix_base_module_t opal_pmix_xpmem_module = {
 static int xpmem_init_count = 0;
 static opal_process_name_t xpmem_pname;
 static opal_proc_table_t *ptable;
+static opal_proc_table_t ptable_loc;
+static opal_condition_t *mca_pmix_xpmem_condition;
+static opal_condition_t mca_pmix_xpmem_condition_loc;
+static opal_mutex_t *mutex;
+static opal_mutex_t mutex_loc;
 
 // need to set up hash table
 // init needs to set up the hash table 
 static int xpmem_init(void)
 {
-    int rc, spawned;
+    int rc, spawned, rank;
     opal_value_t kv;
+    char *rankstr;
 
     ++xpmem_init_count;
 
     printf("%s: initing\n", __func__);
+    /*
+      we don't have ranks yet.
+      so that is interesting.
+      well yes we do thanks to kitten.
+      So what we can do here is load the kitten rank.
+      This defeats the puporse of PMI though.
+      That is fine. We already know where this must be.
+
+     */
     /* so I don't initialize unless I'm rank 0 */
 
     /* store our name in the opal_proc_t so that
@@ -140,7 +155,29 @@ static int xpmem_init(void)
                         OPAL_NAME_PRINT(xpmem_pname),xpmem_pname.jobid,xpmem_pname.vpid);
 
     // setup hash table, not that this differs from the isolated initialization because we have a shared memory hash across address spaces.
-    ptable = malloc(sizeof(opal_proc_table_t));
+    rankstr = getenv("PMI_RANK");
+    if(rankstr == NULL)
+        goto err_exit;
+
+    rank = atoi(rankstr);
+    if(rank == 0){
+        ptable = &ptable_loc;
+        mutex = &mutex_loc;
+        OBJ_CONSTRUCT(mutex, opal_mutex_t);
+        mca_pmix_xpmem_condition = &mca_pmix_xpmem_condition_loc;
+        OBJ_CONSTRUCT(mca_pmix_xpmem_condition, opal_condition_t);
+        opal_condition_signal(mca_pmix_xpmem_condition);
+    }else{
+        // in kitten the first smartmap location is: 0x8000000000UL
+        ptable = (opal_proc_table_t *)(0x8000000000UL + &ptable_loc);
+        mutex = (opal_mutex_t *)(0x8000000000UL + &mutex_loc);
+        mca_pmix_xpmem_condition = (opal_condition_t *)(0x8000000000UL + &mca_pmix_xpmem_condition_loc);
+        OPAL_THREAD_LOCK(mutex);
+        opal_condition_wait(mca_pmix_xpmem_condition, mutex);
+        OPAL_THREAD_UNLOCK(mutex);
+        return OPAL_SUCCESS;
+    }
+
     pmix_xpmem_hash_init(ptable);
 
     /* save the job size */
@@ -396,7 +433,9 @@ static int xpmem_get(const opal_process_name_t *id,
 
     OBJ_CONSTRUCT(&vals, opal_list_t);
     printf("%s: fetching\n", __func__);
+    OPAL_THREAD_LOCK(mutex);
     rc = pmix_xpmem_fetch(ptable, id, key, &vals);
+    OPAL_THREAD_UNLOCK(mutex);
     printf("%s: fetch results %d\n", __func__, rc);
     if (OPAL_SUCCESS == rc) {
         *kv = (opal_value_t*)opal_list_remove_first(&vals);
@@ -471,8 +510,9 @@ static int xpmem_store_local(const opal_process_name_t *proc,
                           opal_value_t *val)
 {
     printf("%s: storing local\n", __func__);
-
+    OPAL_THREAD_LOCK(mutex);
     pmix_xpmem_store(ptable, proc, val);
+    OPAL_THREAD_UNLOCK(mutex);
 
     return OPAL_SUCCESS;
 }
