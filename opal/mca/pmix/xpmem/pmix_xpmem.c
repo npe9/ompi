@@ -117,7 +117,14 @@ static opal_process_name_t xpmem_pname;
 static opal_proc_table_t *ptable;
 static opal_proc_table_t ptable_loc;
 static opal_condition_t *mca_pmix_xpmem_condition;
+static opal_condition_t *mca_pmix_xpmem_condition2;
 static opal_condition_t mca_pmix_xpmem_condition_loc;
+static opal_condition_t mca_pmix_xpmem_condition_loc2;
+static int *var;
+static int var_loc;
+static int *var2;
+static int var2_loc;
+
 static opal_mutex_t *mutex;
 static opal_mutex_t mutex_loc;
 
@@ -158,28 +165,63 @@ static int xpmem_init(void)
     rankstr = getenv("PMI_RANK");
     if(rankstr == NULL)
         goto err_exit;
+    ptable = (opal_proc_table_t *)(0x8000000000UL + (uint64_t)&ptable_loc);
+    mutex = (opal_mutex_t *)(0x8000000000UL + (uint64_t)&mutex_loc);
+    mca_pmix_xpmem_condition = (opal_condition_t *)(0x8000000000UL + (uint64_t)&mca_pmix_xpmem_condition_loc);
+    mca_pmix_xpmem_condition2 = (opal_condition_t *)(0x8000000000UL + (uint64_t)&mca_pmix_xpmem_condition_loc2);
+    var = (opal_proc_table_t *)(0x8000000000UL + (uint64_t)&var_loc);
+    var2 = (opal_proc_table_t *)(0x8000000000UL + (uint64_t)&var2_loc);
 
     rank = atoi(rankstr);
     if(rank == 0){
-        ptable = &ptable_loc;
-        mutex = &mutex_loc;
+        //ptable = &ptable_loc;
+        //mutex = &mutex_loc;
         OBJ_CONSTRUCT(mutex, opal_mutex_t);
-        mca_pmix_xpmem_condition = &mca_pmix_xpmem_condition_loc;
+        //mca_pmix_xpmem_condition = &mca_pmix_xpmem_condition_loc;
         OBJ_CONSTRUCT(mca_pmix_xpmem_condition, opal_condition_t);
-        opal_condition_signal(mca_pmix_xpmem_condition);
+        //mca_pmix_xpmem_condition2 = &mca_pmix_xpmem_condition_loc2;
+        OBJ_CONSTRUCT(mca_pmix_xpmem_condition2, opal_condition_t);
+        //var = &var_loc;
+        *var = 0xdeadbeef;
+        //var2 = &var2_loc;
+        OPAL_THREAD_LOCK(mutex);
+        while(!var2 || *var2 == 0)
+            *var = 0xdeadbeef;
+        printf("%s: *var %x *var2 %x\n", __func__, *var, *var2);
+        printf("%s: %d: signaling on condition variable %p\n", __func__, rank, mca_pmix_xpmem_condition2);
+        opal_condition_signal(mca_pmix_xpmem_condition2);
+        printf("%s: %d: waiting on condition variable %p\n", __func__, rank, mca_pmix_xpmem_condition);
+        //opal_condition_wait(mca_pmix_xpmem_condition, mutex);
+        printf("%s: %d: waited on condition variable %p\n", __func__, rank, mca_pmix_xpmem_condition);
+        OPAL_THREAD_UNLOCK(mutex);
     }else{
         // in kitten the first smartmap location is: 0x8000000000UL
-        ptable = (opal_proc_table_t *)(0x8000000000UL + &ptable_loc);
-        mutex = (opal_mutex_t *)(0x8000000000UL + &mutex_loc);
-        mca_pmix_xpmem_condition = (opal_condition_t *)(0x8000000000UL + &mca_pmix_xpmem_condition_loc);
+        /*
+        ptable = (opal_proc_table_t *)(0x8000000000UL + (uint64_t)&ptable_loc);
+        mutex = (opal_mutex_t *)(0x8000000000UL + (uint64_t)&mutex_loc);
+        mca_pmix_xpmem_condition = (opal_condition_t *)(0x8000000000UL + (uint64_t)&mca_pmix_xpmem_condition_loc);
+        mca_pmix_xpmem_condition2 = (opal_condition_t *)(0x8000000000UL + (uint64_t)&mca_pmix_xpmem_condition_loc2);
+        var = (opal_proc_table_t *)(0x8000000000UL + (uint64_t)&var_loc);
+        var2 = (opal_proc_table_t *)(0x8000000000UL + (uint64_t)&var2_loc);
+        */
+        *var2 = 0xba5eba77;
+        printf("%s: %d: locking\n", __func__, rank);
         OPAL_THREAD_LOCK(mutex);
-        opal_condition_wait(mca_pmix_xpmem_condition, mutex);
+        while(!var || *var == 0)
+            *var2 = 0xba5eba77;
+        printf("%s: *var %x *var2 %x\n", __func__, *var, *var2);
+        printf("%s: %d: waiting on condition variable %p\n", __func__, rank, mca_pmix_xpmem_condition2);
+        //opal_condition_wait(mca_pmix_xpmem_condition2, mutex);
+        printf("%s: %d: waited on condition variable %p\n", __func__, rank, mca_pmix_xpmem_condition2);
+        printf("%s: %d: signaling on condition variable %p\n", __func__, rank, mca_pmix_xpmem_condition);
+        opal_condition_signal(mca_pmix_xpmem_condition);
+
         OPAL_THREAD_UNLOCK(mutex);
-        return OPAL_SUCCESS;
     }
 
     pmix_xpmem_hash_init(ptable);
 
+    printf("%s: finished initializing table\n", __func__);
     /* save the job size */
     OBJ_CONSTRUCT(&kv, opal_value_t);
     kv.key = strdup(OPAL_PMIX_JOB_SIZE);
@@ -282,7 +324,7 @@ static int xpmem_init(void)
         goto err_exit;
     }
     OBJ_DESTRUCT(&kv);
-
+    printf("%s: succeeded continuing\n", __func__);
     return OPAL_SUCCESS;
 
 err_exit:
@@ -399,7 +441,6 @@ static int xpmem_commit(void)
 static int xpmem_fence(opal_list_t *procs, int collect_data)
 {
     printf("%s: fencing\n", __func__);
-
     sleep(1);
     return OPAL_SUCCESS;
 }
@@ -432,7 +473,7 @@ static int xpmem_get(const opal_process_name_t *id,
                         OPAL_NAME_PRINT(*id), key);
 
     OBJ_CONSTRUCT(&vals, opal_list_t);
-    printf("%s: fetching\n", __func__);
+    printf("%s: fetching from %p\n", __func__, ptable);
     OPAL_THREAD_LOCK(mutex);
     rc = pmix_xpmem_fetch(ptable, id, key, &vals);
     OPAL_THREAD_UNLOCK(mutex);
