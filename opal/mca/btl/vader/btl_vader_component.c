@@ -28,7 +28,7 @@
 
 #include "opal/util/output.h"
 #include "opal/util/show_help.h"
-#include "opal/threads/mutex.h"
+#include "opal/mca/threads/mutex.h"
 #include "opal/mca/btl/base/btl_base_error.h"
 
 #include "btl_vader.h"

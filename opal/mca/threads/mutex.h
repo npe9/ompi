@@ -28,7 +28,7 @@
 
 #include "opal_config.h"
 
-#include "opal/threads/thread_usage.h"
+#include "opal/mca/threads/thread_usage.h"
 
 BEGIN_C_DECLS
 

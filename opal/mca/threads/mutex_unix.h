@@ -20,7 +20,7 @@
  *
  * $HEADER$
  */
-
+/*  TODO(nevans) move this into a separate MCA */
 #ifndef  OPAL_MUTEX_UNIX_H
 #define  OPAL_MUTEX_UNIX_H 1
 

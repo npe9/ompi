@@ -19,7 +19,7 @@
 #define OPAL_THREADS_WAIT_SYNC_H
 
 #include "opal/sys/atomic.h"
-#include "opal/threads/condition.h"
+#include "opal/mca/threads/condition.h"
 #include <pthread.h>
 
 BEGIN_C_DECLS

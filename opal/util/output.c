@@ -42,7 +42,7 @@
 
 #include "opal/util/opal_environ.h"
 #include "opal/util/output.h"
-#include "opal/threads/mutex.h"
+#include "opal/mca/threads/mutex.h"
 #include "opal/constants.h"
 
 /*

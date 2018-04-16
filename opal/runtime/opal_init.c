@@ -57,7 +57,7 @@
 #if OPAL_ENABLE_FT_CR    == 1
 #include "opal/mca/compress/base/base.h"
 #endif
-#include "opal/threads/threads.h"
+#include "opal/mca/threads/threads.h"
 
 #include "opal/runtime/opal_cr.h"
 #include "opal/mca/crs/base/base.h"
@@ -731,8 +731,10 @@ static void warn_fork_cb(void)
 
 void opal_warn_fork(void)
 {
+/*
     if (opal_warn_on_fork && !atfork_called) {
         pthread_atfork(warn_fork_cb, NULL, NULL);
         atfork_called = true;
     }
+*/
 }

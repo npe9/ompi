@@ -27,7 +27,7 @@
 #include <string.h>
 
 #include "opal/util/printf.h"
-#include "opal/threads/tsd.h"
+#include "opal/mca/threads/tsd.h"
 
 #include "orte/mca/errmgr/errmgr.h"
 
@@ -90,18 +90,21 @@ get_print_name_buffer(void)
     orte_print_args_buffers_t *ptr;
     int ret, i;
 
+    //printf("%s: fns_init %p\n", __FUNCTION__, fns_init);
     if (!fns_init) {
         /* setup the print_args function */
         if (ORTE_SUCCESS != (ret = opal_tsd_key_create(&print_args_tsd_key, buffer_cleanup))) {
+    	    //printf("%s: couldn't create key %d\n", __FUNCTION__, ret);
             ORTE_ERROR_LOG(ret);
             return NULL;
         }
+	//printf("%s: print_args_tsd_key %p\n", __FUNCTION__, &print_args_tsd_key);
         fns_init = true;
     }
-
     ret = opal_tsd_getspecific(print_args_tsd_key, (void**)&ptr);
     if (OPAL_SUCCESS != ret) return NULL;
-
+    
+    //printf("%s: ptr %p\n", __FUNCTION__, ptr);
     if (NULL == ptr) {
         ptr = (orte_print_args_buffers_t*)malloc(sizeof(orte_print_args_buffers_t));
         for (i=0; i < ORTE_PRINT_NAME_ARG_NUM_BUFS; i++) {
@@ -109,7 +112,9 @@ get_print_name_buffer(void)
         }
         ptr->cntr = 0;
         ret = opal_tsd_setspecific(print_args_tsd_key, (void*)ptr);
+        //printf("%s: ptr->cntr %d\n", __FUNCTION__, ptr->cntr);
     }
+    //printf("%s: after alloc ptr %p\n", __FUNCTION__, ptr);
 
     return (orte_print_args_buffers_t*) ptr;
 }
@@ -123,6 +128,7 @@ char* orte_util_print_name_args(const orte_process_name_t *name)
     if (NULL == name) {
         /* get the next buffer */
         ptr = get_print_name_buffer();
+        //printf("ptr->cntr %d\n", ptr->cntr);
         if (NULL == ptr) {
             ORTE_ERROR_LOG(ORTE_ERR_OUT_OF_RESOURCE);
             return orte_print_args_null;
@@ -169,28 +175,35 @@ char* orte_util_print_jobids(const orte_jobid_t job)
     unsigned long tmp1, tmp2;
 
     ptr = get_print_name_buffer();
-
+    //printf("%s: ptr %p\n", __FUNCTION__, ptr);
     if (NULL == ptr) {
         ORTE_ERROR_LOG(ORTE_ERR_OUT_OF_RESOURCE);
         return orte_print_args_null;
     }
-
+    //ptr->cntr = 0;
+    //printf("cycle around ring ptr %p ptr->cntr %d ORTE_PRINT_NAME_ARG_NUM_BUFS %d\n", ptr, ptr->cntr, ORTE_PRINT_NAME_ARG_NUM_BUFS);
     /* cycle around the ring */
     if (ORTE_PRINT_NAME_ARG_NUM_BUFS == ptr->cntr) {
         ptr->cntr = 0;
     }
-
+     
+    //printf("checking job invalid job %p\n", job);
     if (ORTE_JOBID_INVALID == job) {
+
+    	//printf("job invalid job %p ptr %p ptr->buffer %p ptr->cntr %d\n", job, ptr, ptr->buffers, ptr->cntr);
         snprintf(ptr->buffers[ptr->cntr++], ORTE_PRINT_NAME_ARGS_MAX_SIZE, "[INVALID]");
     } else if (ORTE_JOBID_WILDCARD == job) {
+    	//printf("job wildcard %p\n", job);
         snprintf(ptr->buffers[ptr->cntr++], ORTE_PRINT_NAME_ARGS_MAX_SIZE, "[WILDCARD]");
     } else {
+    	//printf("job good %p\n", job);
         tmp1 = ORTE_JOB_FAMILY((unsigned long)job);
         tmp2 = ORTE_LOCAL_JOBID((unsigned long)job);
         snprintf(ptr->buffers[ptr->cntr++],
                  ORTE_PRINT_NAME_ARGS_MAX_SIZE,
                  "[%lu,%lu]", tmp1, tmp2);
     }
+    //printf("return buffers\n");
     return ptr->buffers[ptr->cntr-1];
 }
 

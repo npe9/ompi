@@ -22,6 +22,7 @@
  * $HEADER$
  */
 
+/*  Should this go in mca/threads/base?  */
 #if !defined(OPAL_THREAD_USAGE_H)
 #define OPAL_THREAD_USAGE_H
 

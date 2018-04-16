@@ -29,7 +29,7 @@
 #include <time.h>
 #include <pthread.h>
 
-#include "opal/threads/mutex.h"
+#include "opal/mca/threads/mutex.h"
 #include "opal/runtime/opal_progress.h"
 
 #include "opal/runtime/opal_cr.h"
