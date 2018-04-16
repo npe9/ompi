@@ -76,12 +76,15 @@ int mca_base_open(void)
     }
 
     /* define the system and user default paths */
+/*
 #if OPAL_WANT_HOME_CONFIG_FILES
+    printf("registering want home config files\n");
     mca_base_system_default_path = strdup(opal_install_dirs.opallibdir);
     asprintf(&mca_base_user_default_path, "%s"OPAL_PATH_SEP".openmpi"OPAL_PATH_SEP"components", opal_home_directory());
 #else
+*/
     asprintf(&mca_base_system_default_path, "%s", opal_install_dirs.opallibdir);
-#endif
+//#endif
 
     /* see if the user wants to override the defaults */
     if (NULL == mca_base_user_default_path) {
@@ -90,7 +93,6 @@ int mca_base_open(void)
         asprintf(&value, "%s%c%s", mca_base_system_default_path,
                  OPAL_ENV_SEP, mca_base_user_default_path);
     }
-
     mca_base_component_path = value;
     var_id = mca_base_var_register("opal", "mca", "base", "component_path",
                                    "Path where to look for additional components",

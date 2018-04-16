@@ -122,6 +122,7 @@
 #include "opal_config.h"
 #include <assert.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 #include "opal/threads/thread_usage.h"
 

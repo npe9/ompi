@@ -564,8 +564,8 @@ static int fork_hnp(void)
         chunk = ORTE_URI_MSG_LGTH-1;
         num_chars_read = 0;
         orted_uri = (char*)malloc(buffer_length);
-        memset(orted_uri, 0, buffer_length);
 
+        memset(orted_uri, 0, buffer_length);
         while (0 != (rc = read(p[0], &orted_uri[num_chars_read], chunk))) {
             if (rc < 0 && (EAGAIN == errno || EINTR == errno)) {
                 continue;
