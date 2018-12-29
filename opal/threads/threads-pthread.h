@@ -26,8 +26,7 @@
 
 #include "opal_config.h"
 
-#include <lithe/lithe.h>
-#include <lithe/fork_join_sched.h>
+#include <pthread.h>
 #include <signal.h>
 
 #include "opal/class/opal_object.h"
@@ -44,17 +43,11 @@ typedef void *(*opal_thread_fn_t) (opal_object_t *);
 
 #define OPAL_THREAD_CANCELLED   ((void*)1);
 
-typedef struct lithe_handle {
-  lithe_fork_join_context_t ctxt;
-  lithe_fork_join_sched_t sched;
-} lithe_handle_t;
-
-
 struct opal_thread_t {
     opal_object_t super;
     opal_thread_fn_t t_run;
     void* t_arg;
-    lithe_handle_t t_handle;
+    pthread_t t_handle;
 };
 
 typedef struct opal_thread_t opal_thread_t;

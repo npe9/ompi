@@ -114,7 +114,7 @@ OPAL_DECLSPEC void opal_progress_event_users_decrement(void);
  * Set whether opal_progress() should yield when idle
  *
  * Set whether opal_progress() should yield the processor (either by
- * sched_yield() or SwitchToThread()) if no events were progressed
+ * lithe_context_yield() or SwitchToThread()) if no events were progressed
  * during the progress loop.  The return value of the callback
  * functions is used to determine whether or not yielding is required.
  * By default, the event loop will yield when the progress function is
@@ -177,7 +177,7 @@ OPAL_DECLSPEC int opal_progress_unregister(opal_progress_callback_t cb);
 
 OPAL_DECLSPEC extern int opal_progress_spin_count;
 
-/* do we want to call sched_yield() if nothing happened */
+/* do we want to call lithe_context_yield() if nothing happened */
 OPAL_DECLSPEC extern bool opal_progress_yield_when_idle;
 
 /**

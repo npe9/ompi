@@ -77,6 +77,7 @@ opal_util_keyval_parse(const char *filename,
     keyval_callback = callback;
 
     /* Open the opal */
+    //printf("keyval_filename %s\n", keyval_filename);
     opal_util_keyval_yyin = fopen(keyval_filename, "r");
     if (NULL == opal_util_keyval_yyin) {
         ret = OPAL_ERR_NOT_FOUND;

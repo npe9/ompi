@@ -46,6 +46,8 @@
 #endif  /* HAVE_SYS_STAT_H */
 #include <signal.h>
 
+#include <lithe/lithe.h>
+
 #include "opal/class/opal_object.h"
 #include "opal/util/opal_environ.h"
 #include "opal/util/show_help.h"
@@ -160,7 +162,7 @@ static const uint32_t ProcInc    = 0x2;
     opal_cr_thread_in_library = true;                             \
     OPAL_THREAD_ADD32(&opal_cr_thread_num_in_library, ProcInc);   \
     while( (opal_cr_thread_num_in_library & ThreadFlag ) != 0 ) { \
-      sched_yield();                                              \
+      lithe_context_yield();                                              \
     }                                                             \
  }
 #define OPAL_CR_UNLOCK()                                         \
@@ -176,7 +178,7 @@ static const uint32_t ProcInc    = 0x2;
       if( !opal_cr_thread_is_active && opal_cr_thread_is_done) {                   \
           break;                                                                   \
       }                                                                            \
-      sched_yield();                                                               \
+      lithe_context_yield();                                                               \
       usleep(opal_cr_thread_sleep_check);                                          \
     }                                                                              \
  }
@@ -1092,7 +1094,7 @@ static void* opal_cr_thread_fn(opal_object_t *obj)
      * Wait to become active
      */
     while( !opal_cr_thread_is_active && !opal_cr_thread_is_done) {
-        sched_yield();
+        lithe_context_yield();
     }
 
     if( opal_cr_thread_is_done ) {
@@ -1110,7 +1112,7 @@ static void* opal_cr_thread_fn(opal_object_t *obj)
         OPAL_CR_THREAD_LOCK();
 
         while ( !opal_cr_thread_in_library ) {
-            sched_yield();
+            lithe_context_yield();
             usleep(opal_cr_thread_sleep_check);
 
             OPAL_CR_TEST_CHECKPOINT_READY();

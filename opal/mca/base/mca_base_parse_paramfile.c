@@ -39,7 +39,7 @@ int mca_base_parse_paramfile(const char *paramfile, opal_list_t *list)
 {
     file_being_read = (char*)paramfile;
     _param_list = list;
-
+    //printf("paramfile %s\n", paramfile);
     return opal_util_keyval_parse(paramfile, save_value);
 }
 

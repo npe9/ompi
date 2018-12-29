@@ -131,6 +131,7 @@ static int mca_pml_ob1_send_request_cancel(struct ompi_request_t* request, int c
 
 static void mca_pml_ob1_send_request_construct(mca_pml_ob1_send_request_t* req)
 {
+    printf("%s: send request construct\n", __func__);
     req->req_send.req_base.req_type = MCA_PML_REQUEST_SEND;
     req->req_send.req_base.req_ompi.req_free = mca_pml_ob1_send_request_free;
     req->req_send.req_base.req_ompi.req_cancel = mca_pml_ob1_send_request_cancel;

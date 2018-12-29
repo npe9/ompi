@@ -3656,7 +3656,7 @@ void* mca_btl_openib_progress_thread(opal_object_t* arg)
 #if 0
         while(ompi_progress_threads()) {
             while(ompi_progress_threads())
-                sched_yield();
+                lithe_context_yield();
             usleep(100); /* give app a chance to re-enter library */
         }
 #endif

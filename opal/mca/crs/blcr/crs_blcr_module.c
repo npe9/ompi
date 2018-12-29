@@ -808,7 +808,7 @@ static void MPIR_checkpoint_debugger_crs_hook(cr_hook_event_t event) {
     if(event == CR_HOOK_RSTRT_NO_CALLBACKS ) {
         /* wait for the MPI thread to refresh the environment for us */
         while(!blcr_crdebug_refreshed_env) {
-            sched_yield();
+            lithe_context_yield();
         }
     }
     /* MPI threads */
@@ -818,7 +818,7 @@ static void MPIR_checkpoint_debugger_crs_hook(cr_hook_event_t event) {
             blcr_crdebug_refreshed_env = true;
         } else {
             while(!blcr_crdebug_refreshed_env) {
-                sched_yield();
+                lithe_context_yield();
             }
         }
     }

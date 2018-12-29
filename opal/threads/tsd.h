@@ -17,7 +17,7 @@
 
 #include "opal_config.h"
 
-#include <pthread.h>
+#include <parlib/dtls.h>
 
 #include "opal/constants.h"
 
@@ -106,24 +106,26 @@ OPAL_DECLSPEC int opal_tsd_getspecific(opal_tsd_key_t key, void **valuep);
 
 #else
 
-typedef pthread_key_t opal_tsd_key_t;
+typedef dtls_key_t opal_tsd_key_t; 
 
 static inline int
 opal_tsd_key_delete(opal_tsd_key_t key)
 {
-    return pthread_key_delete(key);
+    dtls_key_delete(key);
+    return OPAL_SUCCESS;
 }
 
 static inline int
 opal_tsd_setspecific(opal_tsd_key_t key, void *value)
 {
-    return pthread_setspecific(key, value);
+    set_dtls(key, value);
+    return OPAL_SUCCESS;
 }
 
 static inline int
 opal_tsd_getspecific(opal_tsd_key_t key, void **valuep)
 {
-    *valuep = pthread_getspecific(key);
+    *valuep = get_dtls(key);
     return OPAL_SUCCESS;
 }
 

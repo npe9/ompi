@@ -162,7 +162,7 @@ static inline mca_pml_yalla_send_request_t* MCA_PML_YALLA_SREQ_INIT(void *_buf, 
     { \
         if (opal_using_threads()) { \
             while (!mxm_req_test(_req_base)) { \
-                sched_yield(); \
+                lithe_context_yield(); \
                 opal_progress(); \
             } \
         } else if (!mxm_req_test(_req_base)) { \

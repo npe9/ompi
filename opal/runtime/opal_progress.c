@@ -23,6 +23,7 @@
  */
 
 #include "opal_config.h"
+#include <lithe/lithe.h>
 
 #ifdef HAVE_SCHED_H
 #include <sched.h>
@@ -48,6 +49,7 @@ bool opal_progress_debug = false;
  */
 static int opal_progress_event_flag = OPAL_EVLOOP_ONCE | OPAL_EVLOOP_NONBLOCK;
 int opal_progress_spin_count = 10000;
+//int opal_progress_spin_count = 100;
 
 
 /*
@@ -64,7 +66,7 @@ static volatile opal_progress_callback_t *callbacks_lp = NULL;
 static size_t callbacks_lp_len = 0;
 static size_t callbacks_lp_size = 0;
 
-/* do we want to call sched_yield() if nothing happened */
+/* do we want to call lithe_context_yield() if nothing happened */
 bool opal_progress_yield_when_idle = false;
 
 #if OPAL_PROGRESS_USE_TIMERS
@@ -174,7 +176,7 @@ opal_progress_finalize(void)
  * be called.  We don't propogate errors from the progress functions,
  * so no action is taken if they return failures.  The functions are
  * expected to return the number of events progressed, to determine
- * whether or not we should call sched_yield() during MPI progress.
+ * whether or not we should call lithe_context_yield() during MPI progress.
  * This is only losely tracked, as an error return can cause the number
  * of progressed events to appear lower than it actually is.  We don't
  * care, as the cost of that happening is far outweighed by the cost
@@ -229,16 +231,16 @@ opal_progress(void)
         }
     }
 
-#if OPAL_HAVE_SCHED_YIELD
+//#if OPAL_HAVE_SCHED_YIELD
     if (opal_progress_yield_when_idle && events <= 0) {
         /* If there is nothing to do - yield the processor - otherwise
          * we could consume the processor for the entire time slice. If
          * the processor is oversubscribed - this will result in a best-case
          * latency equivalent to the time-slice.
          */
-        sched_yield();
+        lithe_context_yield();
     }
-#endif  /* defined(HAVE_SCHED_YIELD) */
+//#endif  /* defined(HAVE_SCHED_YIELD) */
 }
 
 
