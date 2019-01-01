@@ -19,8 +19,8 @@
  *
  * $HEADER$
  */
-#ifndef OPAL_CONDITION_SPINLOCK_H
-#define OPAL_CONDITION_SPINLOCK_H
+#ifndef OPAL_MCA_CONDITION_SPINLOCK_H
+#define OPAL_MCA_CONDITION_SPINLOCK_H
 
 #include "opal_config.h"
 #ifdef HAVE_SYS_TIME_H
@@ -29,7 +29,7 @@
 #include <time.h>
 #include <pthread.h>
 
-#include "opal/mca/threads/mutex.h"
+#include "opal/threads/mutex.h"
 #include "opal/runtime/opal_progress.h"
 
 #include "opal/runtime/opal_cr.h"
@@ -141,5 +141,5 @@ static inline int opal_condition_broadcast(opal_condition_t *c)
 
 END_C_DECLS
 
-#endif
+#endif // OPAL_MCA_CONDITION_SPINLOCK_H
 

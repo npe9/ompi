@@ -12,8 +12,8 @@
  */
 
 
-#ifndef OPAL_THREADS_TSD_H
-#define OPAL_THREADS_TSD_H
+#ifndef OPAL_MCA_THREADS_TSD_H
+#define OPAL_MCA_THREADS_TSD_H
 
 #include "opal_config.h"
 
@@ -175,4 +175,4 @@ OPAL_DECLSPEC int opal_tsd_keys_destruct(void);
 
 END_C_DECLS
 
-#endif /* OPAL_MTHREADS_TSD_H */
+#endif /* OPAL_MCA_THREADS_TSD_H */

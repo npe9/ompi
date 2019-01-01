@@ -39,7 +39,7 @@
 #include "opal/util/proc.h"
 #include "opal/util/timings.h"
 #include "opal/runtime/opal.h"
-#include "opal/mca/threads/threads.h"
+#include "opal/threads/threads.h"
 
 #include "orte/util/show_help.h"
 #include "orte/mca/ess/base/base.h"

@@ -21,8 +21,8 @@
  * $HEADER$
  */
 
-#ifndef OPAL_THREAD_H
-#define OPAL_THREAD_H 1
+#ifndef OPAL_MCA_THREAD_H
+#define OPAL_MCA_THREAD_H 1
 
 #include "opal_config.h"
 
@@ -51,6 +51,8 @@ struct opal_thread_t {
 };
 
 typedef struct opal_thread_t opal_thread_t;
+
+OBJ_CLASS_DECLARATION(opal_thread_t);
 
 #if OPAL_ENABLE_DEBUG
 OPAL_DECLSPEC extern bool opal_debug_threads;
@@ -138,4 +140,4 @@ OPAL_DECLSPEC void opal_thread_set_main(void);
 
 END_C_DECLS
 
-#endif /* OPAL_THREAD_H */
+#endif /* OPAL_MCA_THREAD_H */

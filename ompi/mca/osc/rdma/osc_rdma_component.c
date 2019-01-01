@@ -37,7 +37,7 @@
 #include "osc_rdma_dynamic.h"
 #include "osc_rdma_accumulate.h"
 
-#include "opal/mca/threads/mutex.h"
+#include "opal/threads/mutex.h"
 #include "opal/util/arch.h"
 #include "opal/util/argv.h"
 #include "opal/align.h"

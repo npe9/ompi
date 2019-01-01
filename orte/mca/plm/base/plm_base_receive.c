@@ -37,7 +37,7 @@
 
 #include "orte/mca/mca.h"
 #include "opal/dss/dss.h"
-#include "opal/mca/threads/threads.h"
+#include "opal/threads/threads.h"
 #include "opal/util/argv.h"
 
 #include "orte/constants.h"

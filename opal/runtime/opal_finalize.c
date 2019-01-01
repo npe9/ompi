@@ -55,7 +55,7 @@
 
 #include "opal/runtime/opal_cr.h"
 #include "opal/mca/crs/base/base.h"
-#include "opal/mca/threads/tsd.h"
+#include "opal/threads/tsd.h"
 
 extern int opal_initialized;
 extern int opal_util_initialized;

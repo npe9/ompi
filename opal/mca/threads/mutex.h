@@ -23,8 +23,8 @@
  * $HEADER$
  */
 
-#ifndef  OPAL_MUTEX_H
-#define  OPAL_MUTEX_H 1
+#ifndef  OPAL_MCA_MUTEX_H
+#define  OPAL_MCA_MUTEX_H 1
 
 #include "opal_config.h"
 
@@ -45,6 +45,10 @@ BEGIN_C_DECLS
  */
 typedef struct opal_mutex_t opal_mutex_t;
 typedef struct opal_mutex_t opal_recursive_mutex_t;
+
+OBJ_CLASS_DECLARATION(opal_mutex_t);
+OBJ_CLASS_DECLARATION(opal_recursive_mutex_t);
+
 
 /**
  * Try to acquire a mutex.
@@ -189,4 +193,4 @@ BEGIN_C_DECLS
 
 END_C_DECLS
 
-#endif                          /* OPAL_MUTEX_H */
+#endif                          /* OPAL_MCA_MUTEX_H */

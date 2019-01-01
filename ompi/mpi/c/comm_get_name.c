@@ -28,7 +28,7 @@
 #include "ompi/communicator/communicator.h"
 #include "ompi/errhandler/errhandler.h"
 #include "ompi/totalview.h"
-#include "opal/mca/threads/mutex.h"
+#include "opal/threads/mutex.h"
 #include "ompi/memchecker.h"
 
 #if OMPI_BUILD_MPI_PROFILING

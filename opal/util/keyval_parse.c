@@ -25,7 +25,7 @@
 #include "opal/util/keyval_parse.h"
 #include "opal/util/keyval/keyval_lex.h"
 #include "opal/util/output.h"
-#include "opal/mca/threads/mutex.h"
+#include "opal/threads/mutex.h"
 #include <string.h>
 #include <ctype.h>
 
@@ -77,7 +77,6 @@ opal_util_keyval_parse(const char *filename,
     keyval_callback = callback;
 
     /* Open the opal */
-    //printf("keyval_filename %s\n", keyval_filename);
     opal_util_keyval_yyin = fopen(keyval_filename, "r");
     if (NULL == opal_util_keyval_yyin) {
         ret = OPAL_ERR_NOT_FOUND;

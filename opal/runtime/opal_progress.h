@@ -31,7 +31,7 @@
 BEGIN_C_DECLS
 
 #include "opal_config.h"
-#include "opal/mca/threads/mutex.h"
+#include "opal/threads/mutex.h"
 
 /**
  * Initialize the progress engine

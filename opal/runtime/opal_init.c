@@ -57,7 +57,7 @@
 #if OPAL_ENABLE_FT_CR    == 1
 #include "opal/mca/compress/base/base.h"
 #endif
-#include "opal/mca/threads/threads.h"
+#include "opal/threads/threads.h"
 
 #include "opal/runtime/opal_cr.h"
 #include "opal/mca/crs/base/base.h"
