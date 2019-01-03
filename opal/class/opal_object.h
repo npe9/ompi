@@ -479,7 +479,6 @@ static inline void opal_obj_run_destructors(opal_object_t * object)
 static inline opal_object_t *opal_obj_new(opal_class_t * cls)
 {
     opal_object_t *object;
-    printf("cls->cls_sizeof %ld sizeof(opal_object_t) %ld\n", cls->cls_sizeof, sizeof(opal_object_t));
     assert(cls->cls_sizeof >= sizeof(opal_object_t));
 
 #if OPAL_WANT_MEMCHECKER
