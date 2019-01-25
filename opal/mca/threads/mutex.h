@@ -28,6 +28,7 @@
 
 #include "opal_config.h"
 
+#include "opal/class/opal_object.h"
 #include "opal/mca/threads/thread_usage.h"
 
 BEGIN_C_DECLS
@@ -43,12 +44,27 @@ BEGIN_C_DECLS
 /**
  * Opaque mutex object
  */
+struct opal_mutex_t {
+    opal_object_t super;
+
+#if OPAL_ENABLE_DEBUG
+    int m_lock_debug;
+    const char *m_lock_file;
+    int m_lock_line;
+#endif
+
+    opal_atomic_lock_t m_lock_atomic;
+	void *mca_private;
+};
 typedef struct opal_mutex_t opal_mutex_t;
 typedef struct opal_mutex_t opal_recursive_mutex_t;
 
+/* XXX(nevans) talk to Howard about how to do this right */
+opal_mutex_t *opal_init_mutex(void);
+#define OPAL_MUTEX_STATIC_INIT *opal_init_mutex()
+
 OBJ_CLASS_DECLARATION(opal_mutex_t);
 OBJ_CLASS_DECLARATION(opal_recursive_mutex_t);
-
 
 /**
  * Try to acquire a mutex.
@@ -56,7 +72,7 @@ OBJ_CLASS_DECLARATION(opal_recursive_mutex_t);
  * @param mutex         Address of the mutex.
  * @return              0 if the mutex was acquired, 1 otherwise.
  */
-static inline int opal_mutex_trylock(opal_mutex_t *mutex);
+ int opal_mutex_trylock(opal_mutex_t *mutex);
 
 
 /**
@@ -64,7 +80,7 @@ static inline int opal_mutex_trylock(opal_mutex_t *mutex);
  *
  * @param mutex         Address of the mutex.
  */
-static inline void opal_mutex_lock(opal_mutex_t *mutex);
+ void opal_mutex_lock(opal_mutex_t *mutex);
 
 
 /**
@@ -72,7 +88,7 @@ static inline void opal_mutex_lock(opal_mutex_t *mutex);
  *
  * @param mutex         Address of the mutex.
  */
-static inline void opal_mutex_unlock(opal_mutex_t *mutex);
+ void opal_mutex_unlock(opal_mutex_t *mutex);
 
 
 /**
@@ -81,7 +97,7 @@ static inline void opal_mutex_unlock(opal_mutex_t *mutex);
  * @param mutex         Address of the mutex.
  * @return              0 if the mutex was acquired, 1 otherwise.
  */
-static inline int opal_mutex_atomic_trylock(opal_mutex_t *mutex);
+ int opal_mutex_atomic_trylock(opal_mutex_t *mutex);
 
 
 /**
@@ -89,7 +105,7 @@ static inline int opal_mutex_atomic_trylock(opal_mutex_t *mutex);
  *
  * @param mutex         Address of the mutex.
  */
-static inline void opal_mutex_atomic_lock(opal_mutex_t *mutex);
+ void opal_mutex_atomic_lock(opal_mutex_t *mutex);
 
 
 /**
@@ -97,13 +113,8 @@ static inline void opal_mutex_atomic_lock(opal_mutex_t *mutex);
  *
  * @param mutex         Address of the mutex.
  */
-static inline void opal_mutex_atomic_unlock(opal_mutex_t *mutex);
+ void opal_mutex_atomic_unlock(opal_mutex_t *mutex);
 
-END_C_DECLS
-
-#include "mutex_unix.h"
-
-BEGIN_C_DECLS
 
 /**
  * Lock a mutex if opal_using_threads() says that multiple threads may

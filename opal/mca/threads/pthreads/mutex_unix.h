@@ -46,7 +46,7 @@
 
 BEGIN_C_DECLS
 
-struct opal_mutex_t {
+struct opal_pthread_mutex_t {
     opal_object_t super;
 
     pthread_mutex_t m_lock_pthread;
@@ -59,8 +59,6 @@ struct opal_mutex_t {
 
     opal_atomic_lock_t m_lock_atomic;
 };
-OPAL_DECLSPEC OBJ_CLASS_DECLARATION(opal_mutex_t);
-OPAL_DECLSPEC OBJ_CLASS_DECLARATION(opal_recursive_mutex_t);
 
 #if defined(PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP)
 #define OPAL_PTHREAD_RECURSIVE_MUTEX_INITIALIZER PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP
