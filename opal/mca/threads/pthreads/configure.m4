@@ -50,8 +50,8 @@ AC_DEFUN([MCA_opal_threads_pthreads_CONFIG],[
                  [threads_pthreads_happy="no"])])
 
     AS_IF([test "$threads_pthreads_happy" = "yes"],
-          [AC_CHECK_HEADERS([mach/mach_time.h])
-           AC_CHECK_FUNC([mach_absolute_time],
+          [AC_CHECK_HEADERS([pthread.h])
+           AC_CHECK_LIB(pthread, pthread_create,
                          [threads_pthreads_happy="yes"],
                          [threads_pthreads_happy="no"])])
 
