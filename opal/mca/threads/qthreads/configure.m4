@@ -31,6 +31,10 @@ AC_DEFUN([MCA_opal_threads_qthreads_POST_CONFIG],[
     AS_IF([test "$1" = "1"], [threads_base_include="qthreads/threads_qthreads.h"])
 ])dnl
 
+AC_DEFUN([MCA_opal_mutex_qthreads_POST_CONFIG],[
+    AS_IF([test "$1" = "1"], [mutex_base_include="qthreads/mutex_unix.h"])
+])dnl
+
 # MCA_threads_qthreads_CONFIG(action-if-can-compile,
 #                        [action-if-cant-compile])
 # ------------------------------------------------
@@ -46,8 +50,8 @@ AC_DEFUN([MCA_opal_threads_qthreads_CONFIG],[
                  [threads_qthreads_happy="no"])])
 
     AS_IF([test "$threads_qthreads_happy" = "yes"],
-          [AC_CHECK_HEADERS([mach/mach_time.h])
-           AC_CHECK_FUNC([mach_absolute_time],
+          [AC_CHECK_HEADERS([pthread.h])
+           AC_CHECK_LIB(pthread, pthread_create,
                          [threads_qthreads_happy="yes"],
                          [threads_qthreads_happy="no"])])
 

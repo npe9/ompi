@@ -23,7 +23,21 @@
 
 #include "opal_config.h"
 
+#include <errno.h>
+#include <pthread.h>
+
 #include "opal/mca/threads/mutex.h"
+//#include "opal/mca/threads/qthreads/mutex_unix.h"
+
+
+OBJ_CLASS_INSTANCE(opal_mutex_t,
+                   opal_object_t,
+                   NULL,
+                   NULL);
+OBJ_CLASS_INSTANCE(opal_recursive_mutex_t,
+                   opal_object_t,
+                   NULL,
+                   NULL);
 
 /*
  * Wait and see if some upper layer wants to use threads, if support
@@ -31,69 +45,19 @@
  */
 bool opal_uses_threads = false;
 
-static void opal_mutex_construct(opal_mutex_t *m)
-{
-#if OPAL_ENABLE_DEBUG
-    pthread_mutexattr_t attr;
-    pthread_mutexattr_init(&attr);
+struct opal_pthread_mutex_t {
+    opal_object_t super;
 
-    /* set type to ERRORCHECK so that we catch recursive locks */
-#if OPAL_HAVE_PTHREAD_MUTEX_ERRORCHECK_NP
-    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK_NP);
-#elif OPAL_HAVE_PTHREAD_MUTEX_ERRORCHECK
-    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK);
-#endif /* OPAL_HAVE_PTHREAD_MUTEX_ERRORCHECK_NP */
-
-    pthread_mutex_init(&m->m_lock_pthread, &attr);
-    pthread_mutexattr_destroy(&attr);
-
-    m->m_lock_debug = 0;
-    m->m_lock_file = NULL;
-    m->m_lock_line = 0;
-#else
-
-    /* Without debugging, choose the fastest available mutexes */
-    pthread_mutex_init(&m->m_lock_pthread, NULL);
-
-#endif /* OPAL_ENABLE_DEBUG */
-
-#if OPAL_HAVE_ATOMIC_SPINLOCKS
-    opal_atomic_init( &m->m_lock_atomic, OPAL_ATOMIC_UNLOCKED );
-#endif
-}
-
-static void opal_mutex_destruct(opal_mutex_t *m)
-{
-    pthread_mutex_destroy(&m->m_lock_pthread);
-}
-
-OBJ_CLASS_INSTANCE(opal_mutex_t,
-                   opal_object_t,
-                   opal_mutex_construct,
-                   opal_mutex_destruct);
-
-static void opal_recursive_mutex_construct(opal_recursive_mutex_t *m)
-{
-    pthread_mutexattr_t attr;
-    pthread_mutexattr_init(&attr);
+    pthread_mutex_t m_lock_pthread;
 
 #if OPAL_ENABLE_DEBUG
-    m->m_lock_debug = 0;
-    m->m_lock_file = NULL;
-    m->m_lock_line = 0;
+    int m_lock_debug;
+    const char *m_lock_file;
+    int m_lock_line;
 #endif
 
-    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+    opal_atomic_lock_t m_lock_atomic;
+};
+typedef struct opal_pthread_mutex_t opal_pthread_mutex_t;
+typedef struct opal_pthread_mutex_t opal_pthread_recursive_mutex_t;
 
-    pthread_mutex_init(&m->m_lock_pthread, &attr);
-    pthread_mutexattr_destroy(&attr);
-
-#if OPAL_HAVE_ATOMIC_SPINLOCKS
-    opal_atomic_init( &m->m_lock_atomic, OPAL_ATOMIC_UNLOCKED );
-#endif
-}
-
-OBJ_CLASS_INSTANCE(opal_recursive_mutex_t,
-                   opal_object_t,
-                   opal_recursive_mutex_construct,
-                   opal_mutex_destruct);

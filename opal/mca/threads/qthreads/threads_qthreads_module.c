@@ -121,3 +121,7 @@ int opal_tsd_keys_destruct()
     }
     return OPAL_SUCCESS;
 }
+
+void opal_event_use_threads(void) {
+	evthread_use_pthreads();
+}
