@@ -50,8 +50,8 @@ AC_DEFUN([MCA_opal_threads_qthreads_CONFIG],[
                  [threads_qthreads_happy="no"])])
 
     AS_IF([test "$threads_qthreads_happy" = "yes"],
-          [AC_CHECK_HEADERS([pthread.h])
-           AC_CHECK_LIB(pthread, pthread_create,
+          [AC_CHECK_HEADERS([qthread/qthread.h])
+           AC_CHECK_LIB(qthread, qthread_fork,
                          [threads_qthreads_happy="yes"],
                          [threads_qthreads_happy="no"])])
 
