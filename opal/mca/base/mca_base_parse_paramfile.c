@@ -38,8 +38,8 @@ static opal_list_t * _param_list;
 int mca_base_parse_paramfile(const char *paramfile, opal_list_t *list)
 {
     file_being_read = (char*)paramfile;
-
     _param_list = list;
+
     return opal_util_keyval_parse(paramfile, save_value);
 }
 
