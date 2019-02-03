@@ -39,7 +39,17 @@ AC_DEFUN([MCA_opal_threads_CONFIG],[
             threads_base_include="base/threads_base_null.h"
         fi
 
+        if test "$mutex_base_include" = "" ; then
+#            mutex_base_include="base/mutex_base_null.h"
+            mutex_base_include="pthreads/mutex_unix.h"
+        fi
         AC_DEFINE_UNQUOTED([MCA_threads_IMPLEMENTATION_HEADER],
                            ["opal/mca/threads/$threads_base_include"],
                            [Header to include for threads implementation])
+
+        AC_DEFINE_UNQUOTED([MCA_mutex_IMPLEMENTATION_HEADER],
+                           ["opal/mca/threads/$mutex_base_include"],
+                           [Header to include for mutex implementation])
 ])
+
+

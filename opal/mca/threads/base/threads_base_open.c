@@ -23,6 +23,7 @@
 #include "opal/constants.h"
 #include "opal/mca/threads/base/base.h"
 
+
 /*
  * The following file was created by configure.  It contains extern
  * statements and the definition of an array of pointers to each

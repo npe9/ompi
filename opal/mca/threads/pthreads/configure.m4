@@ -31,6 +31,10 @@ AC_DEFUN([MCA_opal_threads_pthreads_POST_CONFIG],[
     AS_IF([test "$1" = "1"], [threads_base_include="pthreads/threads_pthreads.h"])
 ])dnl
 
+AC_DEFUN([MCA_opal_mutex_pthreads_POST_CONFIG],[
+    AS_IF([test "$1" = "1"], [mutex_base_include="pthreads/mutex_unix.h"])
+])dnl
+
 # MCA_threads_pthreads_CONFIG(action-if-can-compile,
 #                        [action-if-cant-compile])
 # ------------------------------------------------
