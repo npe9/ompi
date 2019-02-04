@@ -50,8 +50,8 @@ AC_DEFUN([MCA_opal_threads_argobots_CONFIG],[
                  [threads_argobots_happy="no"])])
 
     AS_IF([test "$threads_argobots_happy" = "yes"],
-          [AC_CHECK_HEADERS([pthread.h])
-           AC_CHECK_LIB(pthread, pthread_create,
+          [AC_CHECK_HEADERS([abt.h])
+           AC_CHECK_LIB(abt, ABT_key_create,
                          [threads_argobots_happy="yes"],
                          [threads_argobots_happy="no"])])
 
