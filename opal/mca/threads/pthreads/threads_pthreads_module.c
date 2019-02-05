@@ -123,5 +123,5 @@ int opal_tsd_keys_destruct()
 }
 
 void opal_event_use_threads(void) {
-	printf("%d", *(int*)0);
+    evthread_use_pthreads();
 }
