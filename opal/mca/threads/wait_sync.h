@@ -8,6 +8,7 @@
  * Copyright (c) 2016      Mellanox Technologies. All rights reserved.
  * Copyright (c) 2016      Research Organization for Information Science
  *                         and Technology (RIST). All rights reserved.
+ * Copyright (c) 2017      IBM Corporation. All rights reserved.
  * $COPYRIGHT$
  *
  * Additional copyrights may follow
@@ -20,12 +21,14 @@
 
 #include "opal/sys/atomic.h"
 #include "opal/threads/condition.h"
-#include <pthread.h>
+//#include <pthread.h>
 
 BEGIN_C_DECLS
 
+extern int opal_max_thread_in_progress;
+
 typedef struct ompi_wait_sync_t {
-    int32_t count;
+    opal_atomic_int32_t count;
     int32_t status;
     pthread_cond_t condition;
     pthread_mutex_t lock;
@@ -37,7 +40,7 @@ typedef struct ompi_wait_sync_t {
 #define REQUEST_PENDING        (void*)0L
 #define REQUEST_COMPLETED      (void*)1L
 
-#define SYNC_WAIT(sync)                 (opal_using_threads() ? sync_wait_mt (sync) : sync_wait_st (sync))
+#define SYNC_WAIT(sync)                 (opal_using_threads() ? ompi_sync_wait_mt (sync) : sync_wait_st (sync))
 
 /* The loop in release handles a race condition between the signaling
  * thread and the destruction of the condition variable. The signaling
@@ -75,7 +78,7 @@ typedef struct ompi_wait_sync_t {
         (sync)->signaling = false;                    \
 }
 
-OPAL_DECLSPEC int sync_wait_mt(ompi_wait_sync_t *sync);
+OPAL_DECLSPEC int ompi_sync_wait_mt(ompi_wait_sync_t *sync);
 static inline int sync_wait_st (ompi_wait_sync_t *sync)
 {
     while (sync->count > 0) {
@@ -108,7 +111,7 @@ static inline int sync_wait_st (ompi_wait_sync_t *sync)
 static inline void wait_sync_update(ompi_wait_sync_t *sync, int updates, int status)
 {
     if( OPAL_LIKELY(OPAL_SUCCESS == status) ) {
-        if( 0 != (OPAL_THREAD_ADD32(&sync->count, -updates)) ) {
+        if( 0 != (OPAL_THREAD_ADD_FETCH32(&sync->count, -updates)) ) {
             return;
         }
     } else {
@@ -122,4 +125,4 @@ static inline void wait_sync_update(ompi_wait_sync_t *sync, int updates, int sta
 
 END_C_DECLS
 
-#endif /* defined(OPAL_MCATHREADS_WAIT_SYNC_H) */
+#endif /* defined(OPAL_MCA_THREADS_WAIT_SYNC_H) */
