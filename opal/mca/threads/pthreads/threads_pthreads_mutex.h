@@ -23,8 +23,8 @@
  * $HEADER$
  */
 
-#ifndef  OPAL_MUTEX_UNIX_H
-#define  OPAL_MUTEX_UNIX_H 1
+#ifndef  OPAL_MCA_THREADS_PTHREADS_THREADS_PTHREADS_MUTEX_H
+#define  OPAL_MCA_THREADS_PTHREADS_THREADS_PTHREADS_MUTEX_H 1
 
 /**
  * @file:
@@ -213,4 +213,4 @@ static inline void opal_mutex_atomic_unlock(opal_mutex_t *m)
 
 END_C_DECLS
 
-#endif                          /* OPAL_MUTEX_UNIX_H */
+#endif           /* OPAL_MCA_THREADS_PTHREADS_THREADS_PTHREADS_MUTEX_H */
