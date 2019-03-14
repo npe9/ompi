@@ -139,9 +139,9 @@ static inline void opal_mutex_create(struct opal_mutex_t *m) {
             ABT_mutex_create(&abt_mutex);
         }
         void *null_ptr = OPAL_ABT_MUTEX_NULL;
-        if (opal_atomic_compare_exchange_strong_ptr(&m->m_lock_argobots,
-                                                    &null_ptr,
-                                                    abt_mutex)) {
+        if (opal_atomic_compare_exchange_strong_ptr(
+             (intptr_t *)&m->m_lock_argobots, (intptr_t *)&null_ptr,
+             (intptr_t)abt_mutex)) {
             /* mutex is successfully created and substituted. */
             return;
         }
@@ -263,8 +263,9 @@ static inline void opal_cond_create(opal_cond_t *cond) {
         ABT_cond new_cond;
         ABT_cond_create(&new_cond);
         void *null_ptr = OPAL_ABT_COND_NULL;
-        if (opal_atomic_compare_exchange_strong_ptr(cond, &null_ptr,
-                                                    new_cond)) {
+        if (opal_atomic_compare_exchange_strong_ptr((intptr_t *)cond,
+                                                    (intptr_t *)&null_ptr,
+                                                    (intptr_t)new_cond)) {
             /* cond is successfully created and substituted. */
             return;
         }
