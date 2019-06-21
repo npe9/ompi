@@ -14,6 +14,9 @@
  * Copyright (c) 2015      Research Organization for Information Science
  *                         and Technology (RIST). All rights reserved.
  * Copyright (c) 2019      Sandia National Laboratories. All rights reserved.
+ * Copyright (c) 2019      Triad National Security, LLC. All rights
+ *                         reserved.
+ *
  *
  * $COPYRIGHT$
  *
@@ -21,8 +24,8 @@
  *
  * $HEADER$
  */
-#ifndef OPAL_MCA_CONDITION_SPINLOCK_H
-#define OPAL_MCA_CONDITION_SPINLOCK_H
+#ifndef OPAL_MCA_THREADS_CONDITION_H
+#define OPAL_MCA_THREADS_CONDITION_H
 
 #include "opal_config.h"
 #ifdef HAVE_SYS_TIME_H
@@ -143,5 +146,4 @@ static inline int opal_condition_broadcast(opal_condition_t *c)
 
 END_C_DECLS
 
-#endif // OPAL_MCA_CONDITION_SPINLOCK_H
-
+#endif // OPAL_MCA_THREADS_CONDITION_H

@@ -21,50 +21,6 @@
  * $HEADER$
  */
 
-/**
- * @file
- *
- * High resolution threads / cycle counter
- *
- * High resolution threads / cycle counter interface.  This interface is
- * intended to hide the system-dependent nature of threadss that provide
- * higher resolution and lower calling cost than gettimeofday().
- * Unlike most component interfaces, there should only ever be one
- * component available to be built on a particular platform.
- * Therefore, a number of #defines are available to determine how well
- * the platform supports high resolution threadss:
- *
- * <UL>
- *  <LI><PRE>OPAL_THREADS_CYCLE_NATIVE</PRE> Whether
- *    opal_threads_base_get_cycle() is implemented directly or computed
- *    from some other data (such as a high res threads)</LI>
- *  <LI><PRE>OPAL_THREADS_CYCLE_SUPPORTED</PRE> Whether
- *    opal_threads_base_get_cycle() is supported on the current
- *    platform.</LI>
- *  <LI><PRE>OPAL_THREADS_USEC_SUPPORTED</PRE> Whether
- *    opal_threads_base_get_usec() is supported on the current
- *    platform or implemented on top of gettimeofday(), which
- *    may be unsuitable for some uses.
- * </UL>
- *
- * The cycle count may not be the cycle count of the CPU itself, if
- * there is another sufficiently close counter with better behavior
- * characteristics (like the Time Base counter on many Power/PowerPC
- * platforms).  The function opal_threads_base_get_freq() returns the
- * frequency of the cycle counter in use, *NOT* the frequency of the
- * main CPU.
- *
- * Unless otherwise noted, no attempt is made to cope with the the
- * differences in counters on SMP machines.  If your process switches
- * CPUs, your threads results may change.
- *
- * Build time priorities are allocated as follows:
- *
- * - 0   gettimeofday() wrapper
- * - 10  Assembly threadss with bad frequency search (Linux)
- * - 20  NIC software stack (QSNet, Myrinet?)
- * - 30  Operating systems with native interfaces
- */
 
 #ifndef OPAL_MCA_THREADS_THREADS_H
 #define OPAL_MCA_THREADS_THREADS_H
@@ -78,7 +34,7 @@
 /**
  * Structure for threads components.
  */
-struct opal_threads_base_component_2_0_0_t {
+struct opal_threads_base_component_1_0_0_t {
     /** MCA base component */
     mca_base_component_t threadsc_version;
     /** MCA base data */
@@ -87,12 +43,12 @@ struct opal_threads_base_component_2_0_0_t {
 /**
  * Convenience typedef
  */
-typedef struct opal_threads_base_component_2_0_0_t opal_threads_base_component_2_0_0_t;
+typedef struct opal_threads_base_component_1_0_0_t opal_threads_base_component_1_0_0_t;
 
 /*
  * Macro for use in components that are of type threads
  */
-#define OPAL_THREADS_BASE_VERSION_2_0_0 \
-    OPAL_MCA_BASE_VERSION_2_1_0("threads", 2, 0, 0)
+#define OPAL_THREADS_BASE_VERSION_1_0_0 \
+    OPAL_MCA_BASE_VERSION_2_1_0("threads", 1, 0, 0)
 
 #endif /* OPAL_MCA_THREADS_THREADS_H */

@@ -45,7 +45,6 @@ static void opal_thread_construct(opal_thread_t *t)
 OBJ_CLASS_INSTANCE(opal_thread_t,
                    opal_object_t,
                    opal_thread_construct, NULL);
-     
 
 
 opal_thread_t *opal_thread_get_self(void)
@@ -61,7 +60,7 @@ bool opal_thread_self_compare(opal_thread_t *t)
 }
 
 int sync_wait_mt(void *p) {
-	return 0;
+    return 0;
 }
 
 int opal_thread_join(opal_thread_t *t, void **thr_return) {

@@ -41,7 +41,7 @@ typedef void *(*opal_thread_fn_t) (opal_object_t *);
 
 #define OPAL_THREAD_CANCELLED   ((void*)1);
 
-#include MCA_threads_IMPLEMENTATION_HEADER
+#include MCA_threads_base_include_HEADER
 
 typedef struct opal_thread_t opal_thread_t;
 

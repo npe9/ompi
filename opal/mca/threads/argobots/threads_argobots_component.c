@@ -31,11 +31,11 @@
 
 static int opal_threads_argobots_open(void);
 
-const opal_threads_base_component_2_0_0_t mca_threads_argobots_component = {
+const opal_threads_base_component_1_0_0_t mca_threads_argobots_component = {
     /* First, the mca_component_t struct containing meta information
        about the component itself */
     .threadsc_version = {
-        OPAL_THREADS_BASE_VERSION_2_0_0,
+        OPAL_THREADS_BASE_VERSION_1_0_0,
 
         /* Component name and version */
         .mca_component_name = "argobots",

@@ -24,8 +24,8 @@
  * $HEADER$
  */
 
-#ifndef  OPAL_MCA_MUTEX_H
-#define  OPAL_MCA_MUTEX_H 1
+#ifndef  OPAL_MCA_THREADS_MUTEX_H
+#define  OPAL_MCA_THREADS_MUTEX_H 1
 
 #include "opal_config.h"
 
@@ -46,7 +46,7 @@ BEGIN_C_DECLS
 typedef struct opal_mutex_t opal_mutex_t;
 typedef struct opal_mutex_t opal_recursive_mutex_t;
 
-#include MCA_mutex_IMPLEMENTATION_HEADER
+#include MCA_threads_mutex_base_include_HEADER
 
 OBJ_CLASS_DECLARATION(opal_mutex_t);
 OBJ_CLASS_DECLARATION(opal_recursive_mutex_t);
@@ -190,4 +190,4 @@ static inline void opal_mutex_atomic_unlock(opal_mutex_t *mutex);
 
 END_C_DECLS
 
-#endif                          /* OPAL_MCA_MUTEX_H */
+#endif                          /* OPAL_MCA_THREADS_MUTEX_H */

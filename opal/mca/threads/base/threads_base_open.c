@@ -35,7 +35,6 @@
 
 static int mca_threads_base_register(mca_base_register_flag_t flags)
 {
-   // Do I need to register anything here?
     return OPAL_SUCCESS;
 }
 

@@ -42,6 +42,6 @@ OPAL_DECLSPEC extern mca_base_framework_t opal_threads_base_framework;
 END_C_DECLS
 
 /* include implementation to call */
-#include MCA_threads_IMPLEMENTATION_HEADER
+#include MCA_threads_base_include_HEADER
 
 #endif /* OPAL_BASE_THREADS_H */

@@ -27,7 +27,7 @@ BEGIN_C_DECLS
 
 extern int opal_max_thread_in_progress;
 
-#include MCA_wait_sync_IMPLEMENTATION_HEADER
+#include MCA_threads_wait_sync_base_include_HEADER
 
 #define REQUEST_PENDING        (void*)0L
 #define REQUEST_COMPLETED      (void*)1L

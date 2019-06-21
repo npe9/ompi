@@ -29,7 +29,6 @@
 #include <pthread.h>
 
 #include "opal/mca/threads/mutex.h"
-//#include "opal/mca/threads/pthreads/mutex_unix.h"
 
 /*
  * Wait and see if some upper layer wants to use threads, if support

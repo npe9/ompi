@@ -108,7 +108,7 @@ OPAL_DECLSPEC int opal_tsd_getspecific(opal_tsd_key_t key, void **valuep);
 
 #else
 
-#include MCA_tsd_IMPLEMENTATION_HEADER
+#include MCA_threads_tsd_base_include_HEADER
 
 #endif
 

@@ -37,19 +37,19 @@ AC_DEFUN([MCA_opal_threads_CONFIG],[
         tsd_base_include="${thread_type}/threads_${thread_type}_tsd.h"
         wait_sync_base_include="${thread_type}/threads_${thread_type}_wait_sync.h"
 
-        AC_DEFINE_UNQUOTED([MCA_threads_IMPLEMENTATION_HEADER],
+        AC_DEFINE_UNQUOTED([MCA_threads_base_include_HEADER],
                            ["opal/mca/threads/$threads_base_include"],
                            [Header to include for threads implementation])
 
-        AC_DEFINE_UNQUOTED([MCA_mutex_IMPLEMENTATION_HEADER],
+        AC_DEFINE_UNQUOTED([MCA_threads_mutex_base_include_HEADER],
                            ["opal/mca/threads/$mutex_base_include"],
                            [Header to include for mutex implementation])
 
-        AC_DEFINE_UNQUOTED([MCA_tsd_IMPLEMENTATION_HEADER],
+        AC_DEFINE_UNQUOTED([MCA_threads_tsd_base_include_HEADER],
                            ["opal/mca/threads/$tsd_base_include"],
                            [Header to include for tsd implementation])
 
-        AC_DEFINE_UNQUOTED([MCA_wait_sync_IMPLEMENTATION_HEADER],
+        AC_DEFINE_UNQUOTED([MCA_threads_wait_sync_base_include_HEADER],
                            ["opal/mca/threads/$wait_sync_base_include"],
                            [Header to include for wait_sync implementation])
 ])
