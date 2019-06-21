@@ -54,8 +54,6 @@ AC_DEFUN([MCA_opal_wait_sync_pthreads_POST_CONFIG],[
 AC_DEFUN([MCA_opal_threads_pthreads_CONFIG],[
     AC_CONFIG_FILES([opal/mca/threads/pthreads/Makefile])
 
-    AC_MSG_CHECKING([HAVE_THREAD_PKG_TYPE = $HAVE_THREAD_PKG_TYPE])
-
     AS_IF([test "$HAVE_THREAD_PKG_TYPE" = "pthreads"],
           [$1],
           [$2])
