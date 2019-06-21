@@ -62,8 +62,8 @@
 #include "opal/dss/dss.h"
 #include "opal/mca/shmem/base/base.h"
 #include "opal/mca/compress/base/base.h"
-#include "opal/threads/threads.h"
-#include "opal/threads/tsd.h"
+#include "opal/mca/threads/threads.h"
+#include "opal/mca/threads/tsd.h"
 
 #include "opal/runtime/opal_cr.h"
 #include "opal/mca/crs/base/base.h"

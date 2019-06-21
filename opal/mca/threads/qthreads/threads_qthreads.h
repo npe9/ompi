@@ -9,6 +9,8 @@
  *                         University of Stuttgart.  All rights reserved.
  * Copyright (c) 2004-2005 The Regents of the University of California.
  *                         All rights reserved.
+ * Copyright (c) 2019      Triad National Security, LLC. All rights
+ *                         reserved.
  * $COPYRIGHT$
  *
  * Additional copyrights may follow
@@ -16,8 +18,8 @@
  * $HEADER$
  */
 
-#ifndef OPAL_MCA_TIMER_DARWIN_TIMER_DARWIN_H
-#define OPAL_MCA_TIMER_DARWIN_TIMER_DARWIN_H
+#ifndef OPAL_MCA_THREADS_DARWIN_TIMER_DARWIN_H
+#define OPAL_MCA_THREADS_DARWIN_TIMER_DARWIN_H
 
 #include "opal_config.h"
 #include <mach/mach_time.h>
@@ -93,4 +95,4 @@ opal_tsd_getspecific(opal_tsd_key_t key, void **valuep)
 #define OPAL_TIMER_USEC_NATIVE 1
 #define OPAL_TIMER_USEC_SUPPORTED 1
 
-#endif
+#endif /* OPAL_MCA_THREADS_DARWIN_TIMER_DARWIN_H */

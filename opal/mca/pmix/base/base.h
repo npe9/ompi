@@ -14,7 +14,7 @@
 
 #include "opal_config.h"
 #include "opal/types.h"
-#include "opal/threads/threads.h"
+#include "opal/mca/threads/threads.h"
 #include "opal/mca/mca.h"
 #include "opal/mca/base/mca_base_framework.h"
 

@@ -13,7 +13,7 @@
 #include "orte_config.h"
 
 #include "opal/sys/atomic.h"
-#include "opal/threads/threads.h"
+#include "opal/mca/threads/threads.h"
 
 /* provide macros for forward-proofing the shifting
  * of objects between threads - at some point, we
