@@ -21,6 +21,19 @@
 #
 # $HEADER$
 #
+
+AC_DEFUN([OPAL_CONFIG_ARGOBOTS_THREADS],[
+    AC_CHECK_HEADERS([abt.h],
+                     [AC_CHECK_LIB([abt],[ABT_init],
+                                    [threads_argobots_happy="yes"],
+                                    [threads_argobots_happy="no"])],
+                     [threads_argobots_happy="no"])
+
+    AS_IF([test "$threads_argobots_happy" = "yes"],
+          [$1],
+          [$2])
+])dnl
+
 AC_DEFUN([MCA_opal_threads_argobots_PRIORITY], [30])
 
 AC_DEFUN([MCA_opal_threads_argobots_COMPILE_MODE], [

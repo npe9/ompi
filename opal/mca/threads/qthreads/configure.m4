@@ -19,6 +19,25 @@
 #
 # $HEADER$
 #
+
+#********************************************************************
+#
+# TODO: undoubtedly need some better check than this
+#
+#********************************************************************
+AC_DEFUN([OPAL_CONFIG_QTHREADS],[
+
+    AC_CHECK_HEADERS([mach/mach_time.h],
+                     [AC_CHECK_FUNC([mach_absolute_time],
+                                    [threads_qthreads_happy="yes"],
+                                    [threads_qthreads_happy="no"])],
+                     [threads_qthreads_happy="no"])
+
+    AS_IF([test "$threads_qthreads_happy" = "yes"],
+          [$1],
+          [$2])
+])dnl
+
 AC_DEFUN([MCA_opal_threads_qthreads_PRIORITY], [30])
 
 AC_DEFUN([MCA_opal_threads_qthreads_COMPILE_MODE], [
