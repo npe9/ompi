@@ -20,7 +20,6 @@
 noinst_LTLIBRARIES = libmca_threads_qthreads.la
 
 libmca_threads_qthreads_la_SOURCES = \
-    threads_qthreads.h \
     threads_qthreads_component.c \
     threads_qthreads_mutex.c \
     threads_qthreads_condition.c \
