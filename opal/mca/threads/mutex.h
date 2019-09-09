@@ -58,7 +58,7 @@ OBJ_CLASS_DECLARATION(opal_recursive_mutex_t);
  * @param mutex         Address of the mutex.
  * @return              0 if the mutex was acquired, 1 otherwise.
  */
-static inline int opal_mutex_trylock(opal_mutex_t *mutex);
+int opal_mutex_trylock(opal_mutex_t *mutex);
 
 
 /**
@@ -66,7 +66,7 @@ static inline int opal_mutex_trylock(opal_mutex_t *mutex);
  *
  * @param mutex         Address of the mutex.
  */
-static inline void opal_mutex_lock(opal_mutex_t *mutex);
+void opal_mutex_lock(opal_mutex_t *mutex);
 
 
 /**
@@ -74,7 +74,7 @@ static inline void opal_mutex_lock(opal_mutex_t *mutex);
  *
  * @param mutex         Address of the mutex.
  */
-static inline void opal_mutex_unlock(opal_mutex_t *mutex);
+void opal_mutex_unlock(opal_mutex_t *mutex);
 
 
 /**
@@ -83,7 +83,7 @@ static inline void opal_mutex_unlock(opal_mutex_t *mutex);
  * @param mutex         Address of the mutex.
  * @return              0 if the mutex was acquired, 1 otherwise.
  */
-static inline int opal_mutex_atomic_trylock(opal_mutex_t *mutex);
+int opal_mutex_atomic_trylock(opal_mutex_t *mutex);
 
 
 /**
@@ -91,7 +91,7 @@ static inline int opal_mutex_atomic_trylock(opal_mutex_t *mutex);
  *
  * @param mutex         Address of the mutex.
  */
-static inline void opal_mutex_atomic_lock(opal_mutex_t *mutex);
+void opal_mutex_atomic_lock(opal_mutex_t *mutex);
 
 
 /**
@@ -99,7 +99,7 @@ static inline void opal_mutex_atomic_lock(opal_mutex_t *mutex);
  *
  * @param mutex         Address of the mutex.
  */
-static inline void opal_mutex_atomic_unlock(opal_mutex_t *mutex);
+void opal_mutex_atomic_unlock(opal_mutex_t *mutex);
 
 
 /**
