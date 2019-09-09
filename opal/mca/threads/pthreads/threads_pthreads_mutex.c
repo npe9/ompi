@@ -95,3 +95,102 @@ OBJ_CLASS_INSTANCE(opal_recursive_mutex_t,
                    opal_object_t,
                    mca_threads_pthreads_recursive_mutex_constructor,
                    mca_threads_pthreads_recursive_mutex_desctructor);
+
+/************************************************************************
+ *
+ * mutex operations (non-atomic versions)
+ *
+ ************************************************************************/
+
+ int opal_mutex_trylock(opal_mutex_t *m)
+{
+#if OPAL_ENABLE_DEBUG
+    int ret = pthread_mutex_trylock(&m->m_lock_pthread);
+    if (ret == EDEADLK) {
+        errno = ret;
+        perror("opal_mutex_trylock()");
+        abort();
+    }
+    return ret;
+#else
+    return pthread_mutex_trylock(&m->m_lock_pthread);
+#endif
+}
+
+ void opal_mutex_lock(opal_mutex_t *m)
+{
+#if OPAL_ENABLE_DEBUG
+    int ret = pthread_mutex_lock(&m->m_lock_pthread);
+    if (ret == EDEADLK) {
+        errno = ret;
+        perror("opal_mutex_lock()");
+        abort();
+    }
+#else
+    pthread_mutex_lock(&m->m_lock_pthread);
+#endif
+}
+
+ void opal_mutex_unlock(opal_mutex_t *m)
+{
+#if OPAL_ENABLE_DEBUG
+    int ret = pthread_mutex_unlock(&m->m_lock_pthread);
+    if (ret == EPERM) {
+        errno = ret;
+        perror("opal_mutex_unlock");
+        abort();
+    }
+#else
+    pthread_mutex_unlock(&m->m_lock_pthread);
+#endif
+}
+
+/************************************************************************
+ *
+ * mutex operations (atomic versions)
+ *
+ ************************************************************************/
+
+#if OPAL_HAVE_ATOMIC_SPINLOCKS
+
+/************************************************************************
+ * Spin Locks
+ ************************************************************************/
+
+ int opal_mutex_atomic_trylock(opal_mutex_t *m)
+{
+    return opal_atomic_trylock(&m->m_lock_atomic);
+}
+
+ void opal_mutex_atomic_lock(opal_mutex_t *m)
+{
+    opal_atomic_lock(&m->m_lock_atomic);
+}
+
+ void opal_mutex_atomic_unlock(opal_mutex_t *m)
+{
+    opal_atomic_unlock(&m->m_lock_atomic);
+}
+
+#else
+
+/************************************************************************
+ * Standard locking
+ ************************************************************************/
+
+ int opal_mutex_atomic_trylock(opal_mutex_t *m)
+{
+    return opal_mutex_trylock(m);
+}
+
+ void opal_mutex_atomic_lock(opal_mutex_t *m)
+{
+    opal_mutex_lock(m);
+}
+
+ void opal_mutex_atomic_unlock(opal_mutex_t *m)
+{
+    opal_mutex_unlock(m);
+}
+
+#endif

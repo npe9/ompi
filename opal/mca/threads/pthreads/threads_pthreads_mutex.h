@@ -15,7 +15,7 @@
  * Copyright (c) 2015-2016 Research Organization for Information Science
  *                         and Technology (RIST). All rights reserved.
  * Copyright (c) 2019      Sandia National Laboratories.  All rights reserved.
- * 
+ *
  * $COPYRIGHT$
  *
  * Additional copyrights may follow
@@ -112,104 +112,6 @@ OPAL_DECLSPEC OBJ_CLASS_DECLARATION(opal_recursive_mutex_t);
 
 #endif
 
-/************************************************************************
- *
- * mutex operations (non-atomic versions)
- *
- ************************************************************************/
-
-static inline int opal_mutex_trylock(opal_mutex_t *m)
-{
-#if OPAL_ENABLE_DEBUG
-    int ret = pthread_mutex_trylock(&m->m_lock_pthread);
-    if (ret == EDEADLK) {
-        errno = ret;
-        perror("opal_mutex_trylock()");
-        abort();
-    }
-    return ret;
-#else
-    return pthread_mutex_trylock(&m->m_lock_pthread);
-#endif
-}
-
-static inline void opal_mutex_lock(opal_mutex_t *m)
-{
-#if OPAL_ENABLE_DEBUG
-    int ret = pthread_mutex_lock(&m->m_lock_pthread);
-    if (ret == EDEADLK) {
-        errno = ret;
-        perror("opal_mutex_lock()");
-        abort();
-    }
-#else
-    pthread_mutex_lock(&m->m_lock_pthread);
-#endif
-}
-
-static inline void opal_mutex_unlock(opal_mutex_t *m)
-{
-#if OPAL_ENABLE_DEBUG
-    int ret = pthread_mutex_unlock(&m->m_lock_pthread);
-    if (ret == EPERM) {
-        errno = ret;
-        perror("opal_mutex_unlock");
-        abort();
-    }
-#else
-    pthread_mutex_unlock(&m->m_lock_pthread);
-#endif
-}
-
-/************************************************************************
- *
- * mutex operations (atomic versions)
- *
- ************************************************************************/
-
-#if OPAL_HAVE_ATOMIC_SPINLOCKS
-
-/************************************************************************
- * Spin Locks
- ************************************************************************/
-
-static inline int opal_mutex_atomic_trylock(opal_mutex_t *m)
-{
-    return opal_atomic_trylock(&m->m_lock_atomic);
-}
-
-static inline void opal_mutex_atomic_lock(opal_mutex_t *m)
-{
-    opal_atomic_lock(&m->m_lock_atomic);
-}
-
-static inline void opal_mutex_atomic_unlock(opal_mutex_t *m)
-{
-    opal_atomic_unlock(&m->m_lock_atomic);
-}
-
-#else
-
-/************************************************************************
- * Standard locking
- ************************************************************************/
-
-static inline int opal_mutex_atomic_trylock(opal_mutex_t *m)
-{
-    return opal_mutex_trylock(m);
-}
-
-static inline void opal_mutex_atomic_lock(opal_mutex_t *m)
-{
-    opal_mutex_lock(m);
-}
-
-static inline void opal_mutex_atomic_unlock(opal_mutex_t *m)
-{
-    opal_mutex_unlock(m);
-}
-
-#endif
 
 typedef pthread_cond_t opal_cond_t;
 #define OPAL_CONDITION_STATIC_INIT PTHREAD_COND_INITIALIZER
@@ -222,3 +124,32 @@ typedef pthread_cond_t opal_cond_t;
 END_C_DECLS
 
 #endif           /* OPAL_MCA_THREADS_PTHREADS_THREADS_PTHREADS_MUTEX_H */
+
+ int opal_mutex_trylock(opal_mutex_t *m);
+
+ void opal_mutex_lock(opal_mutex_t *m);
+
+ void opal_mutex_unlock(opal_mutex_t *m);
+
+
+#if OPAL_HAVE_ATOMIC_SPINLOCKS
+
+ int opal_mutex_atomic_trylock(opal_mutex_t *m);
+
+
+ void opal_mutex_atomic_lock(opal_mutex_t *m);
+
+
+ void opal_mutex_atomic_unlock(opal_mutex_t *m);
+
+#else
+
+ int opal_mutex_atomic_trylock(opal_mutex_t *m);
+
+ void opal_mutex_atomic_lock(opal_mutex_t *m);
+
+
+ void opal_mutex_atomic_unlock(opal_mutex_t *m);
+
+
+#endif
