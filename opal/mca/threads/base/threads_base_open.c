@@ -35,6 +35,7 @@
 
 static int mca_threads_base_register(mca_base_register_flag_t flags)
 {
+	mca_threads_base_static_components.priority = 100;
     return OPAL_SUCCESS;
 }
 
