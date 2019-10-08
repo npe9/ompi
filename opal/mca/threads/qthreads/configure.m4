@@ -20,11 +20,6 @@
 # $HEADER$
 #
 
-#********************************************************************
-#
-# TODO: undoubtedly need some better check than this
-#
-#********************************************************************
 AC_DEFUN([OPAL_CONFIG_QTHREADS],[
 
     AC_CHECK_HEADERS([mach/mach_time.h],

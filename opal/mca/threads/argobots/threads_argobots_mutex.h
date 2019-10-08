@@ -68,8 +68,7 @@ struct opal_mutex_t {
     opal_atomic_lock_t m_lock_atomic;
 };
 
-typedef struct opal_argobots_mutex_t opal_pthread_mutex_t;
-typedef struct opal_argobots_mutex_t opal_pthread_recursive_mutex_t;
+typedef struct opal_argobots_mutex_t int;
 
 OPAL_DECLSPEC OBJ_CLASS_DECLARATION(opal_mutex_t);
 OPAL_DECLSPEC OBJ_CLASS_DECLARATION(opal_recursive_mutex_t);
@@ -95,20 +94,6 @@ OPAL_DECLSPEC OBJ_CLASS_DECLARATION(opal_recursive_mutex_t);
     }
 #endif
 
-#if defined(OPAL_PTHREAD_RECURSIVE_MUTEX_INITIALIZER)
-
-#if OPAL_ENABLE_DEBUG
-#define OPAL_RECURSIVE_MUTEX_STATIC_INIT                                \
-    {                                                                   \
-        .super = OPAL_OBJ_STATIC_INIT(opal_mutex_t),                    \
-        .m_lock_argobots = OPAL_ABT_MUTEX_NULL,                         \
-        .m_recursive = 1,                                               \
-        .m_lock_debug = 0,                                              \
-        .m_lock_file = NULL,                                            \
-        .m_lock_line = 0,                                               \
-        .m_lock_atomic = OPAL_ATOMIC_LOCK_INIT,                         \
-    }
-#else
 #define OPAL_RECURSIVE_MUTEX_STATIC_INIT                                \
     {                                                                   \
         .super = OPAL_OBJ_STATIC_INIT(opal_mutex_t),                    \
@@ -116,8 +101,6 @@ OPAL_DECLSPEC OBJ_CLASS_DECLARATION(opal_recursive_mutex_t);
         .m_recursive = 1,                                               \
         .m_lock_atomic = OPAL_ATOMIC_LOCK_INIT,                         \
     }
-#endif
-
 #endif
 
 /************************************************************************
@@ -127,7 +110,7 @@ OPAL_DECLSPEC OBJ_CLASS_DECLARATION(opal_recursive_mutex_t);
  ************************************************************************/
 
 static inline void opal_mutex_create(struct opal_mutex_t *m) {
-    while (m->m_lock_argobots == OPAL_ABT_MUTEX_NULL) {
+    while (OPAL_ABT_MUTEX_NULL == m->m_lock_argobots) {
         ABT_mutex abt_mutex;
         if (m->m_recursive) {
             ABT_mutex_attr abt_mutex_attr;
@@ -152,7 +135,7 @@ static inline void opal_mutex_create(struct opal_mutex_t *m) {
 static inline int opal_mutex_trylock(opal_mutex_t *m)
 {
     ensure_init_argobots();
-    if (m->m_lock_argobots == OPAL_ABT_MUTEX_NULL)
+    if (OPAL_ABT_MUTEX_NULL == m->m_lock_argobots)
         opal_mutex_create(m);
 #if OPAL_ENABLE_DEBUG
     int ret = ABT_mutex_trylock(m->m_lock_argobots);
@@ -170,7 +153,7 @@ static inline int opal_mutex_trylock(opal_mutex_t *m)
 static inline void opal_mutex_lock(opal_mutex_t *m)
 {
     ensure_init_argobots();
-    if (m->m_lock_argobots == OPAL_ABT_MUTEX_NULL)
+    if (OPAL_ABT_MUTEX_NULL == m->m_lock_argobots)
         opal_mutex_create(m);
 #if OPAL_ENABLE_DEBUG
     int ret = ABT_mutex_lock(m->m_lock_argobots);
@@ -187,7 +170,7 @@ static inline void opal_mutex_lock(opal_mutex_t *m)
 static inline void opal_mutex_unlock(opal_mutex_t *m)
 {
     ensure_init_argobots();
-    if (m->m_lock_argobots == OPAL_ABT_MUTEX_NULL)
+    if (OPAL_ABT_MUTEX_NULL == m->m_lock_argobots)
         opal_mutex_create(m);
 #if OPAL_ENABLE_DEBUG
     int ret = ABT_mutex_unlock(m->m_lock_argobots);
@@ -259,7 +242,7 @@ typedef ABT_cond opal_cond_t;
 
 static inline void opal_cond_create(opal_cond_t *cond) {
     ensure_init_argobots();
-    while (*cond == OPAL_ABT_COND_NULL) {
+    while (OPAL_ABT_COND_NULL == *cond) {
         ABT_cond new_cond;
         ABT_cond_create(&new_cond);
         void *null_ptr = OPAL_ABT_COND_NULL;
@@ -280,28 +263,28 @@ static inline int opal_cond_init(opal_cond_t *cond) {
 
 static inline int opal_cond_wait(opal_cond_t *cond, opal_mutex_t *lock) {
     ensure_init_argobots();
-    if (*cond == OPAL_ABT_COND_NULL)
+    if (OPAL_ABT_COND_NULL == *cond)
         opal_cond_create(cond);
     return ABT_cond_wait(*cond, lock->m_lock_argobots);
 }
 
 static inline int opal_cond_broadcast(opal_cond_t *cond) {
     ensure_init_argobots();
-    if (*cond == OPAL_ABT_COND_NULL)
+    if (OPAL_ABT_COND_NULL == *cond)
         opal_cond_create(cond);
     return ABT_cond_broadcast(*cond);
 }
 
 static inline int opal_cond_signal(opal_cond_t *cond) {
     ensure_init_argobots();
-    if (*cond == OPAL_ABT_COND_NULL)
+    if (OPAL_ABT_COND_NULL == *cond)
         opal_cond_create(cond);
     return ABT_cond_signal(*cond);
 }
 
 static inline int opal_cond_destroy(opal_cond_t *cond) {
     ensure_init_argobots();
-    if (*cond != OPAL_ABT_COND_NULL)
+    if (OPAL_ABT_COND_NULL != *cond)
         ABT_cond_free(cond);
     return 0;
 }

@@ -27,7 +27,6 @@
 #include "opal_config.h"
 
 #include <errno.h>
-#include <pthread.h>
 
 #include "opal/mca/threads/mutex.h"
 #include "opal/mca/threads/argobots/threads_argobots_mutex.h"
@@ -52,7 +51,7 @@ static void mca_threads_argobots_mutex_constructor(opal_mutex_t *p_mutex) {
 
 static void mca_threads_argobots_mutex_desctructor(opal_mutex_t *p_mutex) {
     ensure_init_argobots();
-    if (p_mutex->m_lock_argobots != OPAL_ABT_MUTEX_NULL)
+    if (OPAL_ABT_MUTX_NULL != p_mutex->m_lock_argobots)
         ABT_mutex_free(&p_mutex->m_lock_argobots);
 }
 
@@ -72,7 +71,7 @@ static void mca_threads_argobots_recursive_mutex_constructor
 static void mca_threads_argobots_recursive_mutex_desctructor
         (opal_recursive_mutex_t *p_mutex) {
     ensure_init_argobots();
-    if (p_mutex->m_lock_argobots != OPAL_ABT_MUTEX_NULL)
+    if (OPAL_ABT_MUTEX_NULL != p_mutex->m_lock_argobots)
         ABT_mutex_free(&p_mutex->m_lock_argobots);
 }
 

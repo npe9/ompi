@@ -9,12 +9,15 @@
  *                         University of Stuttgart.  All rights reserved.
  * Copyright (c) 2004-2005 The Regents of the University of California.
  *                         All rights reserved.
+ * Copyright (c) 2019      Triad National Security, LLC. All rights
+ *                         reserved.
  * $COPYRIGHT$
  *
  * Additional copyrights may follow
  *
  * $HEADER$
  */
+
 #include <unistd.h>
 
 #include "opal/constants.h"
@@ -29,7 +32,7 @@ struct opal_tsd_key_value {
     opal_tsd_destructor_t destructor;
 };
 
-static pthread_t opal_main_thread;
+static int opal_main_thread;
 struct opal_tsd_key_value *opal_tsd_key_values = NULL;
 static int opal_tsd_key_values_count = 0;
 
@@ -38,8 +41,6 @@ static int opal_tsd_key_values_count = 0;
  */
 static void opal_thread_construct(opal_thread_t *t)
 {
-    t->t_run = 0;
-    t->t_handle = (pthread_t) -1;
 }
 
 OBJ_CLASS_INSTANCE(opal_thread_t,
@@ -49,60 +50,41 @@ OBJ_CLASS_INSTANCE(opal_thread_t,
 
 opal_thread_t *opal_thread_get_self(void)
 {
-    opal_thread_t *t = OBJ_NEW(opal_thread_t);
-    t->t_handle = pthread_self();
-    return t;
+    return NULL;
 }
 
 bool opal_thread_self_compare(opal_thread_t *t)
 {
-    return t->t_handle == pthread_self();
+    return OPAL_ERROR;
 }
 
-int sync_wait_mt(void *p) {
-    return 0;
+int sync_wait_mt(void *p) 
+{
+    return OPAL_ERROR;
 }
 
-int opal_thread_join(opal_thread_t *t, void **thr_return) {
-    int rc = pthread_join(t->t_handle, thr_return);
-    t->t_handle = (pthread_t) -1;
-    return (rc == 0) ? OPAL_SUCCESS : OPAL_ERROR;
+int opal_thread_join(opal_thread_t *t, void **thr_return) 
+{
+    return OPAL_ERROR;
 }
 
-void opal_thread_set_main() {
-    opal_main_thread = pthread_self();
+void opal_thread_set_main() 
+{
 }
 
-int opal_thread_start(opal_thread_t *t) {
-    int rc;
-
-    if (OPAL_ENABLE_DEBUG) {
-        if (NULL == t->t_run || t->t_handle != (pthread_t) -1) {
-            return OPAL_ERR_BAD_PARAM;
-        }
-    }
-
-    rc = pthread_create(&t->t_handle, NULL, (void*(*)(void*)) t->t_run, t);
-
-    return (rc == 0) ? OPAL_SUCCESS : OPAL_ERROR;
+int opal_thread_start(opal_thread_t *t) 
+{
+    return OPAL_ERR_NOT_IMPLEMENTED;
 }
 
 opal_class_t opal_thread_t_class;
 
 int opal_tsd_key_create(opal_tsd_key_t *key, opal_tsd_destructor_t destructor)
 {
-    int rc;
-    rc = pthread_key_create(key, destructor);
-    if ((0 == rc) && (pthread_self() == opal_main_thread)) {
-        opal_tsd_key_values = (struct opal_tsd_key_value *)realloc(opal_tsd_key_values, (opal_tsd_key_values_count+1) * sizeof(struct opal_tsd_key_value));
-        opal_tsd_key_values[opal_tsd_key_values_count].key = *key;
-        opal_tsd_key_values[opal_tsd_key_values_count].destructor = destructor;
-        opal_tsd_key_values_count ++;
-    }
-    return rc;
+    return OPAL_ERR_NOT_IMPLEMENTED;
 }
 
-int opal_tsd_keys_destruct()
+int opal_tsd_keys_destruct(void)
 {
     int i;
     void * ptr;

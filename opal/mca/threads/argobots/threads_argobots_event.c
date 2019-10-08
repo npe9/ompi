@@ -1,3 +1,13 @@
+/* -*- Mode: C; c-basic-offset:4 ; indent-tabs-mode:nil -*- */
+/*
+ * Copyright (c) 2019      Sandia National Laboratories.  All rights reserved.
+ *
+ * $COPYRIGHT$
+ *
+ * Additional copyrights may follow
+ *
+ * $HEADER$
+ */
 
 #include "opal/mca/threads/threads.h"
 #include "opal/mca/threads/argobots/threads_argobots.h"

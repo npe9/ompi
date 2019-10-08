@@ -15,6 +15,7 @@
 #                         and Technology (RIST). All rights reserved.
 # Copyright (c) 2019      Sandia National Laboratories.  All rights reserved.
 # Copyright (c) 2019      Triad National Security, LLC. All rights
+#                         reserved.
 # $COPYRIGHT$
 #
 # Additional copyrights may follow

@@ -9,6 +9,8 @@
  *                         University of Stuttgart.  All rights reserved.
  * Copyright (c) 2004-2005 The Regents of the University of California.
  *                         All rights reserved.
+ * Copyright (c) 2019      Sandia National Laboratories.  All rights reserved.
+ *
  * $COPYRIGHT$
  *
  * Additional copyrights may follow
@@ -122,7 +124,7 @@ int opal_tsd_key_create(opal_tsd_key_t *key, opal_tsd_destructor_t destructor)
     return rc;
 }
 
-int opal_tsd_keys_destruct()
+int opal_tsd_keys_destruct(void)
 {
     ensure_init_argobots();
     int i;
