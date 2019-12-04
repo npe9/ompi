@@ -15,6 +15,7 @@
 #                         and Technology (RIST). All rights reserved.
 # Copyright (c) 2019      Sandia National Laboratories.  All rights reserved.
 # Copyright (c) 2019      Triad National Security, LLC. All rights
+#                         Reserved.
 # $COPYRIGHT$
 #
 # Additional copyrights may follow
@@ -34,6 +35,7 @@ AC_DEFUN([OPAL_CONFIG_ARGOBOTS_THREADS],[
           [$2])
 ])dnl
 
+
 AC_DEFUN([MCA_opal_threads_argobots_PRIORITY], [30])
 
 AC_DEFUN([MCA_opal_threads_argobots_COMPILE_MODE], [
@@ -42,23 +44,24 @@ AC_DEFUN([MCA_opal_threads_argobots_COMPILE_MODE], [
     AC_MSG_RESULT([$$4])
 ])
 
+# If component was selected, $1 will be 1 and we should set the base header
 AC_DEFUN([MCA_opal_threads_argobots_POST_CONFIG],[
-    AS_IF([test "$1" = "1"], [threads_base_include="argobots/threads_argobots_threads.h"])
-])dnl
+    AS_IF([test "$1" = "1"], 
+          [opal_thread_type_found="argobots"
+           AC_DEFINE_UNQUOTED([MCA_threads_base_include_HEADER],
+                              ["opal/mca/threads/argobots/threads_argobots_threads.h"],
+                              [Header to include for threads implementation])
+           AC_DEFINE_UNQUOTED([MCA_threads_mutex_base_include_HEADER],
+                              ["opal/mca/threads/argobots/threads_argobots_mutex.h"],
+                              [Header to include for mutex implementation])
+           AC_DEFINE_UNQUOTED([MCA_threads_tsd_base_include_HEADER],
+                              ["opal/mca/threads/argobots/threads_argobots_tsd.h"],
+                              [Header to include for tsd implementation])
+           AC_DEFINE_UNQUOTED([MCA_threads_wait_sync_base_include_HEADER],
+                              ["opal/mca/threads/argobots/threads_argobots_wait_sync.h"],
+                              [Header to include for wait_sync implementation])
+          ])
 
-AC_DEFUN([MCA_opal_mutex_argobots_POST_CONFIG],[
-    AS_IF([test "$1" = "1"], [mutex_base_include="argobots/threads_argobots_mutex.h"])
-    AC_MSG_CHECKING([mutex_base_include = $mutex_base_include])
-])dnl
-
-AC_DEFUN([MCA_opal_tsd_argobots_POST_CONFIG],[
-    AS_IF([test "$1" = "1"], [threads_base_include="argobots/threads_argobots_tsd.h"])
-    AC_MSG_CHECKING([threads_base_include = $threads_base_include])
-])dnl
-
-AC_DEFUN([MCA_opal_wait_sync_argobots_POST_CONFIG],[
-    AS_IF([test "$1" = "1"], [wait_sync_base_include="argobots/threads_argobots_wait_sync.h"])
-    AC_MSG_CHECKING([wait_sync_base_include = $wait_sync_base_include])
 ])dnl
 
 # MCA_threads_argobots_CONFIG(action-if-can-compile,
@@ -67,7 +70,12 @@ AC_DEFUN([MCA_opal_wait_sync_argobots_POST_CONFIG],[
 AC_DEFUN([MCA_opal_threads_argobots_CONFIG],[
     AC_CONFIG_FILES([opal/mca/threads/argobots/Makefile])
 
-    AS_IF([test "$HAVE_THREAD_PKG_TYPE" = "argobots"],
-          [$1],
+    AS_IF([test "$with_threads" = "argobots"],
+          [OPAL_CONFIG_ARGOBOTS_THREADS([argobots_threads_works=1], [argobots_threads_works=0])],
+          [argobots_threads_works=0])
+
+    AS_IF([test "$argobots_threads_works" = "1"],
+          [$1
+           opal_thread_type_found="argobots"],
           [$2])
 ])

@@ -664,9 +664,11 @@ if test "$opal_pthread_c_success" = "1" && \
    test "$opal_pthread_cxx_success" = "1" && \
    test "$opal_pthread_fortran_success" = "1"; then
   internal_useless=1
+AC_MSG_RESULT("looks like posix threads work")
   $1
 else
   internal_useless=1
+AC_MSG_RESULT("looks like posix threads don't work")
   $2
 fi
 
@@ -682,23 +684,31 @@ AC_DEFUN([MCA_opal_threads_pthreads_COMPILE_MODE], [
     AC_MSG_RESULT([$$4])
 ])
 
+
+# If component was selected, $1 will be 1 and we should set the base header
 AC_DEFUN([MCA_opal_threads_pthreads_POST_CONFIG],[
-    AS_IF([test "$1" = "1"], [threads_base_include="pthreads/threads_pthreads_threads.h"])
-])dnl
-
-AC_DEFUN([MCA_opal_mutex_pthreads_POST_CONFIG],[
-    AS_IF([test "$1" = "1"], [mutex_base_include="pthreads/threads_pthreads_mutex.h"])
-    AC_MSG_CHECKING([mutex_base_include = $mutex_base_include])
-])dnl
-
-AC_DEFUN([MCA_opal_tsd_pthreads_POST_CONFIG],[
-    AS_IF([test "$1" = "1"], [threads_base_include="pthreads/threads_pthreads_tsd.h"])
-    AC_MSG_CHECKING([threads_base_include = $threads_base_include])
-])dnl
-
-AC_DEFUN([MCA_opal_wait_sync_pthreads_POST_CONFIG],[
-    AS_IF([test "$1" = "1"], [wait_sync_base_include="pthreads/threads_pthreads_wait_sync.h"])
-    AC_MSG_CHECKING([wait_sync_includenclude = $wait_sync_base_include])
+    AS_IF([test "$1" = "1"], 
+          [opal_thread_type_found="pthreads"
+           AC_DEFINE_UNQUOTED([MCA_threads_base_include_HEADER],
+                              ["opal/mca/threads/pthreads/threads_pthreads_threads.h"],
+                              [Header to include for threads implementation])
+           AC_DEFINE_UNQUOTED([MCA_threads_mutex_base_include_HEADER],
+                              ["opal/mca/threads/pthreads/threads_pthreads_mutex.h"],
+                              [Header to include for mutex implementation])
+           AC_DEFINE_UNQUOTED([MCA_threads_tsd_base_include_HEADER],
+                              ["opal/mca/threads/pthreads/threads_pthreads_tsd.h"],
+                              [Header to include for tsd implementation])
+           AC_DEFINE_UNQUOTED([MCA_threads_wait_sync_base_include_HEADER],
+                              ["opal/mca/threads/pthreads/threads_pthreads_wait_sync.h"],
+                              [Header to include for wait_sync implementation])
+           THREAD_CFLAGS="$TPKG_CFLAGS"
+           THREAD_FCFLAGS="$TPKG_FCFLAGS"
+           THREAD_CXXFLAGS="$TPKG_CXXFLAGS"
+           THREAD_CPPFLAGS="$TPKG_CPPFLAGS"
+           THREAD_CXXCPPFLAGS="$TPKG_CXXCPPFLAGS"
+           THREAD_LDFLAGS="$TPKG_LDFLAGS"
+           THREAD_LIBS="$TPKG_LIBS"
+          ])
 ])dnl
 
 # MCA_threads_pthreads_CONFIG(action-if-can-compile,
@@ -707,8 +717,13 @@ AC_DEFUN([MCA_opal_wait_sync_pthreads_POST_CONFIG],[
 AC_DEFUN([MCA_opal_threads_pthreads_CONFIG],[
     AC_CONFIG_FILES([opal/mca/threads/pthreads/Makefile])
 
-    AS_IF([test "$HAVE_THREAD_PKG_TYPE" = "pthreads"],
+    AS_IF([test -z "$with_threads" || test "$with_threads" = "pthreads" || test "$with_threads" = "yes"],
+          [OPAL_CONFIG_POSIX_THREADS([posix_threads_works=1],[posix_threads_works=0])],
+          [posix_threads_works=0])
+
+    AS_IF([test "$posix_threads_works" = "1"],
           [$1],
           [$2])
+   AC_MSG_RESULT("posix_threads_works = $posix_threads_works")
 ])
 

@@ -13,6 +13,9 @@
 # Copyright (c) 2010      Cisco Systems, Inc.  All rights reserved.
 # Copyright (c) 2015      Research Organization for Information Science
 #                         and Technology (RIST). All rights reserved.
+# Copyright (c) 2019      Triad National Security, LLC. All rights
+#                         reserved.
+#
 # $COPYRIGHT$
 #
 # Additional copyrights may follow
@@ -41,9 +44,26 @@ AC_DEFUN([MCA_opal_threads_qthreads_COMPILE_MODE], [
     AC_MSG_RESULT([$$4])
 ])
 
+# If component was selected, $1 will be 1 and we should set the base header
 AC_DEFUN([MCA_opal_threads_qthreads_POST_CONFIG],[
-    AS_IF([test "$1" = "1"], [threads_base_include="qthreads/threads_qthreads.h"])
+    AS_IF([test "$1" = "1"], 
+          [opal_thread_type_found="qthreads"
+           AC_DEFINE_UNQUOTED([MCA_threads_base_include_HEADER],
+                              ["opal/mca/threads/qthreads/threads_qthreads.h"],
+                              [Header to include for threads implementation])
+           AC_DEFINE_UNQUOTED([MCA_threads_mutex_base_include_HEADER],
+                              ["opal/mca/threads/qthreads/threads_qthreads_mutex.h"],
+                              [Header to include for mutex implementation])
+           AC_DEFINE_UNQUOTED([MCA_threads_tsd_base_include_HEADER],
+                              ["opal/mca/threads/qthreads/threads_qthreads_tsd.h"],
+                              [Header to include for tsd implementation])
+           AC_DEFINE_UNQUOTED([MCA_threads_wait_sync_base_include_HEADER],
+                              ["opal/mca/threads/qthreads/threads_qthreads_wait_sync.h"],
+                              [Header to include for wait_sync implementation])
+         ])
+
 ])dnl
+
 
 # MCA_threads_qthreads_CONFIG(action-if-can-compile,
 #                        [action-if-cant-compile])
@@ -51,7 +71,12 @@ AC_DEFUN([MCA_opal_threads_qthreads_POST_CONFIG],[
 AC_DEFUN([MCA_opal_threads_qthreads_CONFIG],[
     AC_CONFIG_FILES([opal/mca/threads/qthreads/Makefile])
 
-    AS_IF([test "$HAVE_THREAD_PKG_TYPE" = "qthreads"],
-          [$1],
+    AS_IF([test "$with_threads" = "qthreads"],
+          [OPAL_CONFIG_QTHREADS([qthreads_works=1],[qthreads_works=0])],
+          [qthreads_works=0])
+
+    AS_IF([test "$qthreads_works" = "1"],
+          [$1
+           opal_thread_type_found="qthreads"],
           [$2])
 ])
