@@ -731,8 +731,10 @@ static void warn_fork_cb(void)
 
 void opal_warn_fork(void)
 {
+/*
     if (opal_warn_on_fork && !atfork_called) {
         pthread_atfork(warn_fork_cb, NULL, NULL);
         atfork_called = true;
     }
+*/
 }

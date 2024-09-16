@@ -1548,7 +1548,7 @@ static FORCEINLINE int pthread_acquire_lock (MLOCK_T *sl) {
         thr_yield();
 #else
 #ifdef linux
-        sched_yield();
+        lithe_context_yield();
 #else  /* no-op yield on unknown systems */
         ;
 #endif /* linux */

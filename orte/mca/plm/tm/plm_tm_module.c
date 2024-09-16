@@ -519,7 +519,7 @@ static int plm_tm_connect(void)
          */
         nanosleep(&tp, NULL);
 #ifdef HAVE_SCHED_H
-        sched_yield();
+        lithe_context_yield();
 #endif
     }
 

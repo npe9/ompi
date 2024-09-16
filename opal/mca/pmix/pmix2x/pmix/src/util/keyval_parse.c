@@ -70,7 +70,10 @@ pmix_util_keyval_parse(const char *filename,
     keyval_callback = callback;
 
     /* Open the pmix */
+    //printf("%d:%s keyval_filename %s\n", getpid(), __FUNCTION__, keyval_filename);
+    //goto cleanup;
     pmix_util_keyval_yyin = fopen(keyval_filename, "r");
+    //printf("%d:%s opened keyval_filename %s\n", getpid(), __FUNCTION__, keyval_filename);
     if (NULL == pmix_util_keyval_yyin) {
         ret = PMIX_ERR_NOT_FOUND;
         goto cleanup;

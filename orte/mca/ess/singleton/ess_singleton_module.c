@@ -565,8 +565,9 @@ static int fork_hnp(void)
         num_chars_read = 0;
         orted_uri = (char*)malloc(buffer_length);
         memset(orted_uri, 0, buffer_length);
-
+	//printf("%s: p[0] (fd) %d chunk %d\n", __FUNCTION__, p[0], chunk);
         while (0 != (rc = read(p[0], &orted_uri[num_chars_read], chunk))) {
+	    //printf("%s: read rc %d\n", __FUNCTION__, rc);
             if (rc < 0 && (EAGAIN == errno || EINTR == errno)) {
                 continue;
             } else if (rc < 0) {
@@ -583,6 +584,7 @@ static int fork_hnp(void)
                 buffer_length += chunk;
             }
         }
+	//printf("%s: done read rc %d\n", __FUNCTION__, rc);
         close(p[0]);
 
         if (num_chars_read <= 0) {

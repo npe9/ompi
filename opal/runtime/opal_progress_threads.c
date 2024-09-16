@@ -124,7 +124,6 @@ static int start_progress_engine(opal_progress_tracker_t *trk)
 {
     assert(!trk->ev_active);
     trk->ev_active = true;
-
     /* fork off a thread to progress it */
     trk->engine.t_run = progress_engine;
     trk->engine.t_arg = trk;

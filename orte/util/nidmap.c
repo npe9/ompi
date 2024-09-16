@@ -175,6 +175,7 @@ int orte_util_build_daemon_nidmap(void)
 
         /* construct the URI */
         orte_util_convert_process_name_to_string(&proc_name, &proc);
+	printf("%s: building nidmap\n", __FUNCTION__);
         asprintf(&uri, "%s;tcp://%s:%d", proc_name, addr, (int)orte_process_info.my_port);
         OPAL_OUTPUT_VERBOSE((2, orte_debug_verbosity,
                              "%s orte:util:build:daemon:nidmap node %s daemon %d addr %s uri %s",

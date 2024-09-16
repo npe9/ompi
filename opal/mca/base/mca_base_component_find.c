@@ -113,8 +113,9 @@ int mca_base_component_find (const char *directory, mca_base_framework_t *framew
     }
 
     /* Find all the components that were statically linked in */
+    int i;
     if (static_components) {
-        for (int i = 0 ; NULL != static_components[i]; ++i) {
+        for (i = 0 ; NULL != static_components[i]; ++i) {
             if ( use_component(include_mode,
                                (const char**)requested_component_names,
                                static_components[i]->mca_component_name) ) {
@@ -317,8 +318,8 @@ static int component_find_check (mca_base_framework_t *framework, char **request
     if (NULL == requested_component_names) {
         return OPAL_SUCCESS;
     }
-
-    for (int i = 0; NULL != requested_component_names[i]; ++i) {
+    int i;
+    for (i = 0; NULL != requested_component_names[i]; ++i) {
         bool found = false;
 
         OPAL_LIST_FOREACH(cli, components, mca_base_component_list_item_t) {

@@ -86,6 +86,7 @@ static int orte_ess_base_register(mca_base_register_flag_t flags)
                                 MCA_BASE_VAR_FLAG_INTERNAL,
                                 OPAL_INFO_LVL_9,
                                 MCA_BASE_VAR_SCOPE_READONLY, &orte_ess_base_jobid);
+    printf("%s: %s\n", __func__, orte_ess_base_jobid);
     mca_base_var_register_synonym(ret, "orte", "orte", "ess", "jobid", 0);
 
     orte_ess_base_vpid = NULL;

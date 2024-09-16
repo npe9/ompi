@@ -27,6 +27,7 @@
 #include <sys/time.h>
 #endif
 #include <time.h>
+#include <pthread.h>
 
 #include "opal/threads/mutex.h"
 #include "opal/runtime/opal_progress.h"

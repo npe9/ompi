@@ -321,7 +321,7 @@ static void
 poll_dealloc(struct event_base *base)
 {
 	struct pollop *pop = base->evbase;
-
+	return;
 	evsig_dealloc(base);
 	if (pop->event_set)
 		mm_free(pop->event_set);

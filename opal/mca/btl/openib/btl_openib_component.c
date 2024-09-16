@@ -3348,7 +3348,7 @@ progress_pending_frags_wqe(mca_btl_base_endpoint_t *ep, const int qpn)
             frag = opal_list_remove_first(&ep->qps[qpn].no_wqe_pending_frags[i]);
             if(NULL == frag)
                 break;
-            assert(0 == frag->opal_list_item_refcount);
+            //assert(0 == frag->opal_list_item_refcount);
             tmp_ep = to_com_frag(frag)->endpoint;
             ret = mca_btl_openib_endpoint_post_send(tmp_ep, to_send_frag(frag));
             if (OPAL_SUCCESS != ret) {
@@ -3656,7 +3656,7 @@ void* mca_btl_openib_progress_thread(opal_object_t* arg)
 #if 0
         while(ompi_progress_threads()) {
             while(ompi_progress_threads())
-                sched_yield();
+                lithe_context_yield();
             usleep(100); /* give app a chance to re-enter library */
         }
 #endif
