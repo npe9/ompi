@@ -31,6 +31,10 @@
 # $HEADER$
 #
 
+# MCA_threads_lithe_PRIORITY
+# --------------------------
+AC_DEFUN([MCA_opal_threads_lithe_PRIORITY], [30])
+
 # MCA_threads_lithe_CONFIG([action-if-found], [action-if-not-found])
 # -----------------------------------------------------------
 AC_DEFUN([MCA_opal_threads_lithe_CONFIG],[
@@ -39,11 +43,11 @@ AC_DEFUN([MCA_opal_threads_lithe_CONFIG],[
     OPAL_VAR_SCOPE_PUSH([lithe_happy])
 
     # Check for lithe
-    OPAL_CHECK_PACKAGE([lithe],
+    OAC_CHECK_PACKAGE([lithe],
                        [lithe],
-                       [lithe.h],
+                     [lithe/lithe.h],
                        [lithe],
-                       [lithe_init],
+                       [lithe_lib_init],
                        [lithe_happy=yes],
                        [lithe_happy=no])
 
