@@ -36,21 +36,23 @@
 #include "opal_config.h"
 
 #include "opal/mca/threads/threads.h"
-#include "opal/mca/threads/base/base.h"
-#include "opal/mca/threads/base/threads_base_frame.h"
+#include "opal/mca/threads/thread.h"
 
-#include <lithe.h>
+/* Forward declarations to avoid including lithe/parlib headers in the public interface */
+typedef struct opal_threads_base_component_t opal_threads_base_component_t;
+typedef struct opal_threads_base_module_t opal_threads_base_module_t;
+typedef struct lithe_context lithe_context_t;
 
 BEGIN_C_DECLS
 
-OPAL_DECLSPEC extern opal_threads_base_component_t mca_threads_lithe_component;
+OPAL_DECLSPEC extern const mca_base_component_t mca_threads_lithe_component;
 
-typedef struct {
-    opal_threads_base_module_t super;
+struct mca_threads_lithe_module_t {
+    opal_threads_base_module_t *super;
     lithe_context_t *context;
-} opal_threads_lithe_module_t;
+};
 
-OPAL_DECLSPEC extern opal_threads_lithe_module_t opal_threads_lithe_module;
+typedef struct mca_threads_lithe_module_t mca_threads_lithe_module_t;
 
 END_C_DECLS
 

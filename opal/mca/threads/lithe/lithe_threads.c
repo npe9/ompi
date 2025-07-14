@@ -35,10 +35,11 @@
 #include "opal/mca/threads/lithe/lithe_threads.h"
 #include "opal/mca/threads/threads.h"
 #include "opal/mca/threads/base/base.h"
-#include "opal/mca/threads/base/threads_base_frame.h"
 #include "opal/util/output.h"
 
-#include <lithe.h>
+#include <lithe/lithe.h>
+#include <lithe/mutex.h>
+#include <lithe/condvar.h>
 
 /*
  * Local functions
@@ -53,56 +54,34 @@ static int lithe_threads_set_affinity(opal_thread_t *thread, int cpu);
 /*
  * Component structure
  */
-opal_threads_base_component_t mca_threads_lithe_component = {
-    .threads_version = {
-        OPAL_THREADS_BASE_VERSION_2_0_0,
-        .mca_component_name = "lithe",
-        MCA_BASE_MAKE_VERSION(component, OPAL_MAJOR_VERSION, OPAL_MINOR_VERSION,
-                              OPAL_RELEASE_VERSION),
-        .mca_open_component = NULL,
-        .mca_close_component = NULL,
-        .mca_register_component_params = NULL,
-    },
-    .threads_data = {
-        .parameter_name = "lithe",
-        .priority = 10,
-        .want_default = true,
-    },
+const mca_base_component_t mca_threads_lithe_component = {
+    .mca_component_name = "lithe",
+    MCA_BASE_MAKE_VERSION(component, OPAL_MAJOR_VERSION, OPAL_MINOR_VERSION,
+                          OPAL_RELEASE_VERSION),
+    .mca_open_component = NULL,
+    .mca_close_component = NULL,
+    .mca_register_component_params = NULL,
 };
 
 /*
  * Module structure
  */
-opal_threads_lithe_module_t opal_threads_lithe_module = {
-    .super = {
-        .threads_init = lithe_threads_init,
-        .threads_finalize = lithe_threads_finalize,
-        .threads_yield = lithe_threads_yield,
-        .threads_join = lithe_threads_join,
-        .threads_create = lithe_threads_create,
-        .threads_set_affinity = lithe_threads_set_affinity,
-    },
+mca_threads_lithe_module_t mca_threads_lithe_module = {
+    .super = NULL,
     .context = NULL
 };
 
 static int lithe_threads_init(void)
 {
-    int ret;
-
-    ret = lithe_init();
-    if (OPAL_UNLIKELY(ret != 0)) {
-        opal_output(0, "lithe_threads_init: lithe_init() failed with error %d\n", ret);
-        return OPAL_ERROR;
-    }
-
+    /* lithe_lib_init is called automatically via constructor attribute */
     return OPAL_SUCCESS;
 }
 
 static int lithe_threads_finalize(void)
 {
-    if (opal_threads_lithe_module.context != NULL) {
-        lithe_context_destroy(opal_threads_lithe_module.context);
-        opal_threads_lithe_module.context = NULL;
+    if (mca_threads_lithe_module.context != NULL) {
+        lithe_context_cleanup(mca_threads_lithe_module.context);
+        mca_threads_lithe_module.context = NULL;
     }
 
     return OPAL_SUCCESS;
@@ -110,7 +89,7 @@ static int lithe_threads_finalize(void)
 
 static int lithe_threads_yield(void)
 {
-    lithe_yield();
+    lithe_context_yield();
     return OPAL_SUCCESS;
 }
 
@@ -122,14 +101,8 @@ static int lithe_threads_join(opal_thread_t *thread, void **exit_status)
 
 static int lithe_threads_create(opal_thread_t *thread, opal_thread_fn_t func, void *arg)
 {
-    int ret;
-
-    ret = lithe_context_create(&opal_threads_lithe_module.context, func, arg);
-    if (OPAL_UNLIKELY(ret != 0)) {
-        opal_output(0, "lithe_threads_create: lithe_context_create() failed with error %d\n", ret);
-        return OPAL_ERROR;
-    }
-
+    /* Initialize the context */
+    lithe_context_init(mca_threads_lithe_module.context, (void (*)(void *))func, arg);
     return OPAL_SUCCESS;
 }
 

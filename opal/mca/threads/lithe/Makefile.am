@@ -43,6 +43,7 @@ component_install =
 endif
 
 AM_CPPFLAGS = $(threads_lithe_CPPFLAGS)
+AM_CPPFLAGS += -I/tmp/lithe-install/include -I/tmp/parlib-install/include
 
 mcacomponentdir = $(opallibdir)
 mcacomponent_LTLIBRARIES = $(component_install)
