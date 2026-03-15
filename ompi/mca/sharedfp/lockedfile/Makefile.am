@@ -41,6 +41,7 @@ mca_sharedfp_lockedfile_la_LIBADD = $(OMPI_TOP_BUILDDIR)/ompi/mca/common/ompio/l
 noinst_LTLIBRARIES = $(component_noinst)
 libmca_sharedfp_lockedfile_la_SOURCES = $(sources)
 libmca_sharedfp_lockedfile_la_LDFLAGS = -module -avoid-version
+libmca_sharedfp_lockedfile_la_LIBADD = $(OMPI_TOP_BUILDDIR)/ompi/mca/common/ompio/libmca_common_ompio.la
 
 # Source files
 
