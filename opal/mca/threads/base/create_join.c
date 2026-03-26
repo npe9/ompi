@@ -23,6 +23,7 @@
  * $HEADER$
  */
 
+#include "opal_config.h"
 #include <unistd.h>
 #include <pthread.h>
 
@@ -32,6 +33,8 @@
 #include "opal/prefetch.h"
 #include "opal/util/output.h"
 #include "opal/util/sys_limits.h"
+
+#include MCA_threads_base_include_HEADER
 
 /*
  * Constructor
@@ -46,24 +49,30 @@ OBJ_CLASS_INSTANCE(opal_thread_t, opal_object_t, opal_thread_construct, NULL);
 
 int opal_thread_start(opal_thread_t *t)
 {
-    int rc;
-
     if (OPAL_ENABLE_DEBUG) {
         if (NULL == t->t_run || (pthread_t) -1 != t->t_handle) {
             return OPAL_ERR_BAD_PARAM;
         }
     }
 
-    rc = pthread_create(&t->t_handle, NULL, (void *(*) (void *) ) t->t_run, t);
-
+#ifdef HAVE_LITHE
+    return opal_threads_base_module.thread_create(
+        (opal_thread_fn_t)t->t_run, t, t, NULL);
+#else
+    int rc = pthread_create(&t->t_handle, NULL, (void *(*) (void *) ) t->t_run, t);
     return 0 == rc ? OPAL_SUCCESS : OPAL_ERR_IN_ERRNO;
+#endif
 }
 
 int opal_thread_join(opal_thread_t *t, void **thr_return)
 {
+#ifdef HAVE_LITHE
+    return opal_threads_base_module.thread_join(t, thr_return);
+#else
     int rc = pthread_join(t->t_handle, thr_return);
     t->t_handle = (pthread_t) -1;
     return 0 == rc ? OPAL_SUCCESS : OPAL_ERR_IN_ERRNO;
+#endif
 }
 
 bool opal_thread_self_compare(opal_thread_t *t)

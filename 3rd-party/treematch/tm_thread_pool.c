@@ -7,6 +7,10 @@
 #include <errno.h>
 #include <limits.h>
 
+#ifdef HAVE_LITHE
+#define TM_USE_OPAL_THREADS 1
+#endif
+
 typedef enum _mapping_policy {COMPACT, SCATTER} mapping_policy_t;
 
 static mapping_policy_t mapping_policy = COMPACT;
@@ -165,6 +169,12 @@ void tm_wait_work_completion(work_t *work){
 
 
 int tm_submit_work(work_t *work, int thread_id){
+  if (pool->nb_threads == 0) {
+    work->thread_id = thread_id;
+    execute_work(work);
+    work->done = 1;
+    return 1;
+  }
   if( (thread_id>=0) && (thread_id< pool->nb_threads)){
     work->thread_id = thread_id;
     add_work(&pool->list_lock[thread_id], &pool->cond_var[thread_id], &pool->working_list[thread_id], work);
@@ -183,12 +193,7 @@ thread_pool_t *create_threads(){
 
   verbose_level = tm_get_verbose_level();
 
-    /*Get number of cores: set 1 thread per core*/
-  /* Allocate and initialize topology object. */
   hwloc_topology_init(&topology);
-  /* Only keep relevant levels
-     hwloc_topology_ignore_all_keep_structure(topology);*/
-  /* Perform the topology detection. */
   hwloc_topology_load(topology);
   depth = hwloc_topology_get_depth(topology);
   if (depth == -1 ) {
@@ -197,11 +202,12 @@ thread_pool_t *create_threads(){
     exit(-1);
   }
 
-
-
-  /* at depth 'depth' it is necessary a PU/core where we can execute things*/
   nb_cores = hwloc_get_nbobjs_by_depth(topology, depth-1);
   nb_threads = TM_MIN(nb_cores,  max_nb_threads);
+
+#ifdef TM_USE_OPAL_THREADS
+  nb_threads = 0;
+#endif
 
   if(verbose_level>=INFO)
     printf("nb_threads = %d\n",nb_threads);
@@ -209,12 +215,12 @@ thread_pool_t *create_threads(){
   pool = (thread_pool_t*) MALLOC(sizeof(thread_pool_t));
   pool -> topology = topology;
   pool -> nb_threads = nb_threads;
-  pool -> thread_list = (pthread_t*)MALLOC(sizeof(pthread_t)*nb_threads);
-  pool -> working_list = (work_t*)CALLOC(nb_threads,sizeof(work_t));
-  pool -> cond_var = (pthread_cond_t*)MALLOC(sizeof(pthread_cond_t)*nb_threads);
-  pool -> list_lock = (pthread_mutex_t*)MALLOC(sizeof(pthread_mutex_t)*nb_threads);
+  pool -> thread_list = (pthread_t*)MALLOC(sizeof(pthread_t)*(nb_threads > 0 ? nb_threads : 1));
+  pool -> working_list = (work_t*)CALLOC((nb_threads > 0 ? nb_threads : 1),sizeof(work_t));
+  pool -> cond_var = (pthread_cond_t*)MALLOC(sizeof(pthread_cond_t)*(nb_threads > 0 ? nb_threads : 1));
+  pool -> list_lock = (pthread_mutex_t*)MALLOC(sizeof(pthread_mutex_t)*(nb_threads > 0 ? nb_threads : 1));
 
-  local=(local_thread_t*)MALLOC(sizeof(local_thread_t)*nb_threads);
+  local=(local_thread_t*)MALLOC(sizeof(local_thread_t)*(nb_threads > 0 ? nb_threads : 1));
   pool->local = local;
 
   for (i=0;i<nb_threads;i++){
@@ -279,6 +285,7 @@ void tm_terminate_thread_pool(){
 
 int tm_get_nb_threads(){
   pool = get_thread_pool();
+  if (pool->nb_threads == 0) return 1;
   return pool -> nb_threads;
 }
 

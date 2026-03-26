@@ -67,19 +67,23 @@ AC_DEFUN([MCA_opal_threads_lithe_CONFIG],[
           [AS_IF([test -n "$with_lithe" && test "$with_lithe" != "yes"],
                  [opal_lithe_dir="$with_lithe"])
     AS_IF([test -n "$opal_lithe_dir"],
-                      [opal_lithe_CPPFLAGS="-I$opal_lithe_dir/include"
-                       opal_lithe_LDFLAGS="-L$opal_lithe_dir/lib"
-                       opal_lithe_LIBS="-Wl,--start-group -lparlib -lithe -Wl,--end-group"],
-                      [opal_lithe_LIBS="-Wl,--start-group -lparlib -lithe -Wl,--end-group"]) 
+                      [AS_IF([test -z "$opal_lithe_CPPFLAGS"],
+                             [opal_lithe_CPPFLAGS="-I$opal_lithe_dir/include"])
+                       AS_IF([test -z "$opal_lithe_LDFLAGS"],
+                             [opal_lithe_LDFLAGS="-L$opal_lithe_dir/lib"])
+                       AS_IF([test -z "$opal_lithe_LIBS"],
+                             [opal_lithe_LIBS="-Wl,--start-group -lparlib -lithe -Wl,--end-group"])],
+                      [AS_IF([test -z "$opal_lithe_LIBS"],
+                             [opal_lithe_LIBS="-Wl,--start-group -lparlib -lithe -Wl,--end-group"])]) 
 
-           # Check if we can link against Lithe
-           CPPFLAGS_save=$CPPFLAGS
+           # Check if we can link against Lithe (use unique var names to avoid scope clash)
+           opal_lithe_cpp_sv=$CPPFLAGS
            CPPFLAGS="$CPPFLAGS $opal_lithe_CPPFLAGS"
            AC_CHECK_HEADER([lithe/lithe.h],
                           [opal_threads_lithe_happy="yes"],
                           [opal_threads_lithe_happy="no"])
-           CPPFLAGS=$CPPFLAGS_save
-           LDFLAGS_save=$LDFLAGS
+           CPPFLAGS=$opal_lithe_cpp_sv
+           opal_lithe_ld_sv=$LDFLAGS
            LDFLAGS="$LDFLAGS $opal_lithe_LDFLAGS"
            # libithe is the actual library name
            # Check if library files exist (since linking test may fail due to dependencies)
@@ -89,7 +93,7 @@ AC_DEFUN([MCA_opal_threads_lithe_CONFIG],[
                         [opal_threads_lithe_happy="yes"],
                         [opal_threads_lithe_happy="no"])],
                  [opal_threads_lithe_happy="no"])
-           LDFLAGS=$LDFLAGS_save],
+           LDFLAGS=$opal_lithe_ld_sv],
           [opal_threads_lithe_happy="no"])
 
     # Propagate toolchain flags for callers
@@ -101,6 +105,21 @@ AC_DEFUN([MCA_opal_threads_lithe_CONFIG],[
            TPKG_CXXCPPFLAGS="$opal_lithe_CPPFLAGS"
            TPKG_LDFLAGS="$opal_lithe_LDFLAGS"
            TPKG_LIBS="$opal_lithe_LIBS"
+
+           # Extract -Wl,-wrap,* flags from opal_lithe_LIBS for the compiler wrapper.
+           # Programs built with mpicxx need these on the final link line so the
+           # linker creates __real_* symbols for the wrap interposition to work.
+           threads_lithe_wrap_flags=""
+           threads_lithe_lib_flags=""
+           for _f in $opal_lithe_LIBS; do
+               case "$_f" in
+                   -Wl,-wrap,*) threads_lithe_wrap_flags="$threads_lithe_wrap_flags $_f" ;;
+                   *)           threads_lithe_lib_flags="$threads_lithe_lib_flags $_f" ;;
+               esac
+           done
+           threads_lithe_WRAPPER_EXTRA_LDFLAGS="$opal_lithe_LDFLAGS $threads_lithe_wrap_flags"
+           threads_lithe_WRAPPER_EXTRA_LIBS="$threads_lithe_lib_flags"
+
            $1
            opal_thread_type_found="lithe"],
           [$2])

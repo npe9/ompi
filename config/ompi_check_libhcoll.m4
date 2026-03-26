@@ -17,7 +17,7 @@ dnl
 # LDFLAGS, LIBS} as needed and runs action-if-found if there is
 # support, otherwise executes action-if-not-found
 AC_DEFUN([OMPI_CHECK_HCOLL],[
-    OPAL_VAR_SCOPE_PUSH([ompi_check_hcoll_happy CPPFLAGS_save LDFLAGS_save LIBS_save])
+    OPAL_VAR_SCOPE_PUSH([ompi_check_hcoll_happy ompi_check_hcoll_CPPFLAGS_save ompi_check_hcoll_LDFLAGS_save ompi_check_hcoll_LIBS_save])
 
     AC_ARG_WITH([hcoll],
         [AS_HELP_STRING([--with-hcoll(=DIR)],
@@ -33,9 +33,9 @@ AC_DEFUN([OMPI_CHECK_HCOLL],[
                       [ompi_check_hcoll_happy="no"])
 
     AS_IF([test "$ompi_check_hcoll_happy" = "yes"],
-          [CPPFLAGS_save=$CPPFLAGS
-           LDFLAGS_save=$LDFLAGS
-           LIBS_save=$LIBS
+          [ompi_check_hcoll_CPPFLAGS_save=$CPPFLAGS
+           ompi_check_hcoll_LDFLAGS_save=$LDFLAGS
+           ompi_check_hcoll_LIBS_save=$LIBS
 
            CPPFLAGS="${$1_CPPFLAGS} ${CPPFLAGS}"
            LDFLAGS="${$1_LDFLAGS} ${LDFLAGS}"
@@ -43,9 +43,9 @@ AC_DEFUN([OMPI_CHECK_HCOLL],[
 
            AC_CHECK_FUNCS(hcoll_context_free, [], [])
 
-           CPPFLAGS=$CPPFLAGS_save
-           LDFLAGS=$LDFLAGS_save
-           LIBS=$LIBS_save])
+           CPPFLAGS=$ompi_check_hcoll_CPPFLAGS_save
+           LDFLAGS=$ompi_check_hcoll_LDFLAGS_save
+           LIBS=$ompi_check_hcoll_LIBS_save])
 
     AS_IF([test "$ompi_check_hcoll_happy" = "yes" && test "$enable_progress_threads" = "yes"],
           [AC_MSG_WARN([hcoll driver does not currently support progress threads.  Disabling HCOLL.])

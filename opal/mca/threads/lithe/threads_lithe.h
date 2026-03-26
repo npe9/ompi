@@ -24,9 +24,18 @@
 #include "opal_config.h"
 #include "opal/mca/threads/threads.h"
 #include "opal/mca/threads/lithe/threads_lithe_threads.h"
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#endif
 #include "lithe/lithe.h"
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 
 BEGIN_C_DECLS
+
+/* LITHE_ASSERT_VCORE and in_vcore_context declaration: threads_lithe_mutex.h (via threads.h → mutex.h). */
 
 /* Forward declarations */
 struct opal_thread_t;
@@ -118,6 +127,7 @@ static inline void opal_threads_lithe_ensure_init(void)
  */
 static inline void opal_thread_yield(void)
 {
+    LITHE_ASSERT_VCORE();
     lithe_context_yield();
 }
 

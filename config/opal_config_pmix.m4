@@ -93,6 +93,9 @@ AC_DEFUN([OPAL_CONFIG_PMIX], [
                        OPAL_APPEND([internal_pmix_wrapper_libs], [$opal_hwloc_WRAPPER_BUILD_LIBS])
                        OPAL_APPEND([internal_pmix_CPPFLAGS], [$opal_hwloc_BUILD_CPPFLAGS])])
 
+                AS_IF([test -n "$with_lithe" -a "$with_lithe" != "no"],
+                      [OPAL_APPEND([internal_pmix_CPPFLAGS], [-DHAVE_LITHE -I$with_lithe/include])])
+
                 if test "$WANT_DEBUG" = "1"; then
                      OPAL_APPEND([internal_pmix_args], [--enable-debug])
                 fi

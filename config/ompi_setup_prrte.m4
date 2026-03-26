@@ -184,6 +184,9 @@ AC_DEFUN([_OMPI_SETUP_PRRTE_INTERNAL], [
            internal_prrte_args="$internal_prrte_args --with-hwloc-extra-libs=\"$opal_hwloc_BUILD_LIBS\""
            internal_prrte_CPPFLAGS="$internal_prrte_CPPFLAGS $opal_hwloc_BUILD_CPPFLAGS"])
 
+    AS_IF([test -n "$with_lithe" -a "$with_lithe" != "no"],
+          [internal_prrte_CPPFLAGS="$internal_prrte_CPPFLAGS -DHAVE_LITHE -I$with_lithe/include"])
+
     AS_IF([test "$opal_pmix_mode" = "internal"],
           [internal_prrte_args="$internal_prrte_args --disable-pmix-lib-checks"
            internal_prrte_args="$internal_prrte_args --with-pmix-extra-libs=\"$opal_pmix_BUILD_LIBS\""

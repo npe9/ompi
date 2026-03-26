@@ -36,6 +36,7 @@
 /* Scheduler state - must match threads_lithe_module.c */
 extern lithe_fork_join_sched_t *opal_sched;
 extern bool opal_sched_entered;
+extern volatile int opal_lithe_vcore_ready;
 
 static int opal_threads_lithe_open(void);
 static int opal_threads_lithe_register(void);

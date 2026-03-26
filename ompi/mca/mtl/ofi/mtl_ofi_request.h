@@ -15,6 +15,12 @@
 
 #include "mtl_ofi.h"
 
+#include <stddef.h>
+#ifndef container_of
+#define container_of(ptr, type, member) \
+    ((type *) (((char *) (ptr)) - offsetof(type, member)))
+#endif
+
 #define TO_OFI_REQ(_ptr_ctx) \
     container_of((_ptr_ctx), struct ompi_mtl_ofi_request_t, ctx)
 

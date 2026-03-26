@@ -24,9 +24,20 @@
 #include "opal_config.h"
 #include "opal/class/opal_object.h"
 #include "opal/constants.h"
+#include <stdio.h>
+#include <stdlib.h>
+
+/* lithe headers pull parlib; static inlines there trigger -Wunused-function under OPAL's -Wall. */
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#endif
 #include "lithe/lithe.h"
 #include "lithe/mutex.h"
 #include "lithe/condvar.h"
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 /* Avoid macro collisions with parlib */
 #ifdef CHECK_FLAG
@@ -54,7 +65,22 @@ BEGIN_C_DECLS
 
 #include <pthread.h>
 
-/* Hybrid mutex: uses Lithe when in Lithe context, pthread otherwise */
+struct uthread;
+extern __thread struct uthread *current_uthread;
+
+/** Abort if not on a Lithe-managed uthread (stray pthread detection).
+ *  in_vcore_context() is only true in raw vcore scheduling callbacks, not
+ *  in uthreads. current_uthread != NULL is the correct check: it's non-NULL
+ *  for any thread managed by parlib/Lithe and NULL for raw pthreads. */
+#define LITHE_ASSERT_VCORE() do { \
+    if (current_uthread == NULL) { \
+        fprintf(stderr, "[LITHE] FATAL: Lithe component entered from non-vcore context " \
+                "(stray pthread? current_uthread=NULL). Aborting.\n"); \
+        abort(); \
+    } \
+} while (0)
+
+/* Hybrid mutex: lithe only on lock paths (pthread fields kept for struct layout / init) */
 typedef struct {
     lithe_mutex_t lithe_lock;
     pthread_mutex_t pthread_lock;
@@ -79,12 +105,6 @@ typedef struct {
 #define OPAL_THREAD_INTERNAL_COND_INITIALIZER { \
     .lithe_cond = { .lock = {0}, .waiting_qnode = NULL, .waiting_mutex = NULL, .queue = {NULL, NULL} }, \
     .pthread_cond = PTHREAD_COND_INITIALIZER \
-}
-
-/* Check if we're in a Lithe context */
-static inline int in_lithe_context(void) {
-    extern lithe_context_t *lithe_context_self(void);
-    return lithe_context_self() != NULL;
 }
 
 static inline int opal_thread_internal_mutex_init(opal_thread_internal_mutex_t *p_mutex, bool recursive)
@@ -123,31 +143,21 @@ OPAL_DECLSPEC void ensure_main_fj_context(void);
 
 static inline int opal_thread_internal_mutex_lock(opal_thread_internal_mutex_t *p_mutex)
 {
-    if (in_lithe_context()) {
-        ensure_main_fj_context();
-        return 0 == lithe_mutex_lock(&p_mutex->lithe_lock) ? OPAL_SUCCESS : OPAL_ERR_IN_ERRNO;
-    } else {
-        /* Not in Lithe context (e.g., PMIx pthread) - use pthread */
-        return 0 == pthread_mutex_lock(&p_mutex->pthread_lock) ? OPAL_SUCCESS : OPAL_ERR_IN_ERRNO;
-    }
+    LITHE_ASSERT_VCORE();
+    ensure_main_fj_context();
+    return 0 == lithe_mutex_lock(&p_mutex->lithe_lock) ? OPAL_SUCCESS : OPAL_ERR_IN_ERRNO;
 }
 
 static inline int opal_thread_internal_mutex_trylock(opal_thread_internal_mutex_t *p_mutex)
 {
-    if (in_lithe_context()) {
-        return 0 == lithe_mutex_trylock(&p_mutex->lithe_lock) ? OPAL_SUCCESS : OPAL_ERR_IN_ERRNO;
-    } else {
-        return 0 == pthread_mutex_trylock(&p_mutex->pthread_lock) ? OPAL_SUCCESS : OPAL_ERR_IN_ERRNO;
-    }
+    LITHE_ASSERT_VCORE();
+    return 0 == lithe_mutex_trylock(&p_mutex->lithe_lock) ? OPAL_SUCCESS : OPAL_ERR_IN_ERRNO;
 }
 
 static inline int opal_thread_internal_mutex_unlock(opal_thread_internal_mutex_t *p_mutex)
 {
-    if (in_lithe_context()) {
-        return 0 == lithe_mutex_unlock(&p_mutex->lithe_lock) ? OPAL_SUCCESS : OPAL_ERR_IN_ERRNO;
-    } else {
-        return 0 == pthread_mutex_unlock(&p_mutex->pthread_lock) ? OPAL_SUCCESS : OPAL_ERR_IN_ERRNO;
-    }
+    LITHE_ASSERT_VCORE();
+    return 0 == lithe_mutex_unlock(&p_mutex->lithe_lock) ? OPAL_SUCCESS : OPAL_ERR_IN_ERRNO;
 }
 
 static inline int opal_thread_internal_cond_init(opal_thread_internal_cond_t *p_cond)
@@ -165,27 +175,22 @@ static inline int opal_thread_internal_cond_destroy(opal_thread_internal_cond_t 
 
 static inline int opal_thread_internal_cond_wait(opal_thread_internal_cond_t *p_cond, opal_thread_internal_mutex_t *p_mutex)
 {
-    if (in_lithe_context()) {
-        ensure_main_fj_context();
-        return 0 == lithe_condvar_wait(&p_cond->lithe_cond, &p_mutex->lithe_lock) ? OPAL_SUCCESS : OPAL_ERR_IN_ERRNO;
-    } else {
-        return 0 == pthread_cond_wait(&p_cond->pthread_cond, &p_mutex->pthread_lock) ? OPAL_SUCCESS : OPAL_ERR_IN_ERRNO;
-    }
+    LITHE_ASSERT_VCORE();
+    ensure_main_fj_context();
+    return 0 == lithe_condvar_wait(&p_cond->lithe_cond, &p_mutex->lithe_lock) ? OPAL_SUCCESS : OPAL_ERR_IN_ERRNO;
 }
 
 static inline int opal_thread_internal_cond_signal(opal_thread_internal_cond_t *p_cond)
 {
-    /* Signal both - one will be no-op */
+    LITHE_ASSERT_VCORE();
     lithe_condvar_signal(&p_cond->lithe_cond);
-    pthread_cond_signal(&p_cond->pthread_cond);
     return OPAL_SUCCESS;
 }
 
 static inline int opal_thread_internal_cond_broadcast(opal_thread_internal_cond_t *p_cond)
 {
-    /* Broadcast both - one will be no-op */
+    LITHE_ASSERT_VCORE();
     lithe_condvar_broadcast(&p_cond->lithe_cond);
-    pthread_cond_broadcast(&p_cond->pthread_cond);
     return OPAL_SUCCESS;
 }
 
