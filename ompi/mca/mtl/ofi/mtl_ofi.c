@@ -44,6 +44,42 @@ mca_mtl_ofi_module_t ompi_mtl_ofi = {
     NULL
 };
 
+static uint32_t ompi_mtl_ofi_lithe_ranks_per_host(void)
+{
+    char *env = getenv("LITHE_CONTEXT_RANKS_PER_HOST");
+    char *end = NULL;
+    unsigned long value;
+
+    if (NULL == env || '\0' == *env) {
+        return 0;
+    }
+    value = strtoul(env, &end, 10);
+    if (end == env || value < 2 || value > UINT32_MAX) {
+        return 0;
+    }
+    return (uint32_t) value;
+}
+
+static void ompi_mtl_ofi_lithe_host_proc_name(opal_process_name_t *name)
+{
+    uint32_t ranks_per_host = ompi_mtl_ofi_lithe_ranks_per_host();
+
+    if (ranks_per_host > 1 && name->vpid != OPAL_VPID_WILDCARD &&
+        name->vpid != OPAL_VPID_INVALID) {
+        name->vpid /= ranks_per_host;
+    }
+}
+
+static int ompi_mtl_ofi_modex_recv_proc(ompi_proc_t *proc, void **ep_name, size_t *size)
+{
+    int ret;
+    opal_process_name_t name = proc->super.proc_name;
+
+    ompi_mtl_ofi_lithe_host_proc_name(&name);
+    OPAL_MODEX_RECV(ret, &mca_mtl_ofi_component.super.mtl_version,
+                    &name, ep_name, size);
+    return ret;
+}
 
 static int ompi_mtl_ofi_init_contexts(struct mca_mtl_base_module_t *mtl,
                                       struct ompi_communicator_t *comm,
@@ -52,8 +88,7 @@ static int ompi_mtl_ofi_init_contexts(struct mca_mtl_base_module_t *mtl,
     int ret;
     int ctxt_id = ompi_mtl_ofi.total_ctxts_used;
     struct fi_cq_attr cq_attr = {0};
-    cq_attr.format = FI_CQ_FORMAT_TAGGED;
-    cq_attr.size = ompi_mtl_ofi.ofi_progress_event_count;
+    ompi_mtl_ofi_init_cq_attr(&cq_attr);
 
     if (OFI_REGULAR_EP == ep_type) {
         /*
@@ -96,7 +131,8 @@ static int ompi_mtl_ofi_init_contexts(struct mca_mtl_base_module_t *mtl,
         goto init_error;
     }
 
-    ret = fi_cq_open(ompi_mtl_ofi.domain, &cq_attr, &ompi_mtl_ofi.ofi_ctxt[ctxt_id].cq, NULL);
+    ret = ompi_mtl_ofi_open_cq(&cq_attr, &ompi_mtl_ofi.ofi_ctxt[ctxt_id].cq,
+                               &ompi_mtl_ofi.ofi_ctxt[ctxt_id].cq_wait_fd);
     if (ret) {
         MTL_OFI_LOG_FI_ERR(ret, "fi_cq_open failed");
         goto init_error;
@@ -142,6 +178,12 @@ init_regular_ep:
                                 __FILE__, __LINE__, ret);
             goto init_error;
         }
+#if HAVE_LITHE
+        if (ompi_mtl_ofi.progress_block_enabled &&
+            ompi_mtl_ofi.ofi_ctxt[ctxt_id].cq_wait_fd >= 0) {
+            opal_progress_set_block_callback(ompi_mtl_ofi_progress_block_no_inline);
+        }
+#endif
     }
 
     ompi_mtl_ofi.comm_to_context[comm->c_index] = ompi_mtl_ofi.total_ctxts_used;
@@ -258,11 +300,7 @@ ompi_mtl_ofi_add_procs(struct mca_mtl_base_module_t *mtl,
         /**
          * Retrieve the processes' EP name from modex.
          */
-        OFI_COMPAT_MODEX_RECV(ret,
-                              &mca_mtl_ofi_component.super.mtl_version,
-                              procs[i],
-                              (void**)&ep_name,
-                              &size);
+        ret = ompi_mtl_ofi_modex_recv_proc(procs[i], (void **) &ep_name, &size);
         if (OMPI_SUCCESS != ret) {
             char *errhost = opal_get_proc_hostname(&procs[i]->super);
             opal_show_help("help-mtl-ofi.txt", "modex failed",
@@ -374,8 +412,23 @@ int ompi_mtl_ofi_add_comm(struct mca_mtl_base_module_t *mtl,
             }
         }
         if (OMPI_COMM_IS_INTRA(comm)) {
-            mtl_comm->c_index_vec[comm->c_my_rank].c_index = comm->c_index;
-            mtl_comm->c_index_vec[comm->c_my_rank].c_index_state = MCA_MTL_OFI_CID_EXCHANGED;
+            int my_rank = ompi_comm_rank(comm);
+            mtl_comm->c_index_vec[my_rank].c_index = comm->c_index;
+            mtl_comm->c_index_vec[my_rank].c_index_state = MCA_MTL_OFI_CID_EXCHANGED;
+            if (comm == &ompi_mpi_comm_world.comm) {
+                uint32_t ranks_per_host = ompi_mtl_ofi_lithe_ranks_per_host();
+                if (ranks_per_host > 1) {
+                    uint32_t base_rank = (uint32_t) my_rank / ranks_per_host * ranks_per_host;
+                    uint32_t end_rank = base_rank + ranks_per_host;
+                    if (end_rank > comm_size) {
+                        end_rank = comm_size;
+                    }
+                    for (uint32_t rank = base_rank; rank < end_rank; ++rank) {
+                        mtl_comm->c_index_vec[rank].c_index = comm->c_index;
+                        mtl_comm->c_index_vec[rank].c_index_state = MCA_MTL_OFI_CID_EXCHANGED;
+                    }
+                }
+            }
         }
 
         comm->c_mtl_comm = mtl_comm;

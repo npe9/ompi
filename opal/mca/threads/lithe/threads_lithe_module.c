@@ -17,9 +17,12 @@
 #include <pthread.h>
 #include <execinfo.h>
 #include <sys/mman.h>
+#include <sched.h>
 #include <time.h>
 #include <errno.h>
 #include <unistd.h>
+
+#include "src/threads/pmix_threads.h"
 
 extern bool in_vcore_context(void);
 extern void uthread_default_vcore_entry(void) __attribute__((noreturn));
@@ -60,7 +63,7 @@ static int lithe_set_affinity(opal_thread_t *t, void *topo, int bitmap_index);
 static int lithe_get_affinity(opal_thread_t *t, void *topo, int bitmap_index);
 
 typedef void(opal_threads_pthreads_yield_fn_t)(void);
-static void yield_wrapper(void) { lithe_context_yield(); }
+static void yield_wrapper(void) { lithe_context_yield(); sched_yield(); }
 __attribute__((visibility("default")))
 opal_threads_pthreads_yield_fn_t *opal_threads_pthreads_yield_fn = &yield_wrapper;
 
@@ -72,6 +75,24 @@ static void lithe_wrapper(void *arg) {
 struct lithe_thread_handle {
     lithe_fork_join_context_t *ctx;
 };
+
+void opal_threads_lithe_ensure_opal_fork_join_sched(void)
+{
+    if (opal_sched == NULL) {
+        opal_sched = lithe_fork_join_sched_create();
+        if (opal_sched == NULL) {
+            return;
+        }
+    }
+    pmix_lithe_register_fork_join_sched(opal_sched);
+    if (!opal_sched_entered) {
+        lithe_sched_t *cur = lithe_sched_current();
+        if (cur != NULL) {
+            lithe_sched_enter((lithe_sched_t *)opal_sched);
+            opal_sched_entered = true;
+        }
+    }
+}
 
 opal_threads_base_module_t opal_threads_lithe_module = {
     .threads_init = lithe_init,
@@ -102,26 +123,14 @@ static int lithe_init(void) {
         return OPAL_SUCCESS;
     }
 
-    opal_sched = lithe_fork_join_sched_create();
-    if (lithe_debug_enabled())
-        fprintf(stderr, "[LITHE-INIT] Created scheduler %p\n", (void*)opal_sched);
-    if (opal_sched == NULL) return OPAL_ERROR;
-
-    lithe_sched_t *cur = lithe_sched_current();
-    if (lithe_debug_enabled())
-        fprintf(stderr, "[LITHE-INIT] current_sched=%p, in_vcore=%d\n", (void*)cur, in_vcore_context());
-    /* Match threads_lithe_component.c / BUILD_ORDER_AND_PLAN: enter fork-join sched when a parent
-     * sched exists. After LITHE_ASSERT_VCORE, !in_vcore_context() is never true here (would be dead). */
-    if (cur != NULL && !opal_sched_entered) {
-        if (lithe_debug_enabled())
-            fprintf(stderr, "[LITHE-INIT] Entering scheduler\n");
-        lithe_sched_enter((lithe_sched_t *)opal_sched);
-        opal_sched_entered = true;
-        if (lithe_debug_enabled())
-            fprintf(stderr, "[LITHE-INIT] Entered scheduler\n");
-    } else {
-        if (lithe_debug_enabled())
-            fprintf(stderr, "[LITHE-INIT] NOT entering scheduler (cur=%p, entered=%d)\n", (void*)cur, opal_sched_entered);
+    opal_threads_lithe_ensure_opal_fork_join_sched();
+    if (lithe_debug_enabled()) {
+        lithe_sched_t *cur = lithe_sched_current();
+        fprintf(stderr, "[LITHE-INIT] opal_sched=%p entered=%d current_sched=%p in_vcore=%d\n",
+                (void *)opal_sched, (int)opal_sched_entered, (void *)cur, in_vcore_context());
+    }
+    if (opal_sched == NULL) {
+        return OPAL_ERROR;
     }
 
     return OPAL_SUCCESS;
@@ -178,6 +187,7 @@ static int lithe_thread_equal(opal_thread_t t1, opal_thread_t t2) {
 static int lithe_yield_fn(void) {
     LITHE_ASSERT_VCORE();
     lithe_context_yield();
+    sched_yield();
     return OPAL_SUCCESS;
 }
 
@@ -206,15 +216,7 @@ void opal_threads_lithe_preinit(void) {}
 
 void ensure_main_fj_context(void)
 {
-    if (opal_sched_entered) return;
-    if (!opal_sched) {
-        opal_sched = lithe_fork_join_sched_create();
-        if (!opal_sched) return;
-    }
-    if (!opal_sched_entered) {
-        lithe_sched_enter((lithe_sched_t *)opal_sched);
-        opal_sched_entered = true;
-    }
+    opal_threads_lithe_ensure_opal_fork_join_sched();
 }
 
 /* ================================================================

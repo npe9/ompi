@@ -28,6 +28,15 @@
 #include "opal/util/string_copy.h"
 #include "proc.h"
 
+#include <stdlib.h>
+
+#if defined(__has_include)
+#    if __has_include(<parlib/dtls.h>)
+#        include <parlib/dtls.h>
+#        define OPAL_HAVE_PARLIB_DTLS 1
+#    endif
+#endif
+
 opal_process_name_t opal_name_wildcard = {OPAL_JOBID_WILDCARD, OPAL_VPID_WILDCARD};
 opal_process_name_t opal_name_invalid = {OPAL_JOBID_INVALID, OPAL_VPID_INVALID};
 
@@ -65,6 +74,31 @@ static opal_proc_t opal_local_proc = {{.opal_list_next = NULL, .opal_list_prev =
                                       .proc_flags = 0,
                                       .proc_convertor = NULL};
 static opal_proc_t *opal_proc_my_name = &opal_local_proc;
+#if OPAL_HAVE_PARLIB_DTLS
+static dtls_key_t opal_proc_local_dtls_key;
+static volatile int opal_proc_local_dtls_ready;
+
+static void opal_proc_local_dtls_destruct(void *value)
+{
+    opal_proc_t *proc = (opal_proc_t *) value;
+    if (NULL != proc && &opal_local_proc != proc) {
+        OBJ_RELEASE(proc);
+    }
+}
+
+static void opal_proc_local_dtls_init(void)
+{
+    if (opal_proc_local_dtls_ready) {
+        return;
+    }
+    if (NULL == getenv("OMPI_LITHE_CONTEXT_LOCAL_PROC")) {
+        opal_proc_local_dtls_ready = -1;
+        return;
+    }
+    opal_proc_local_dtls_key = dtls_key_create(opal_proc_local_dtls_destruct);
+    opal_proc_local_dtls_ready = (NULL == opal_proc_local_dtls_key) ? -1 : 1;
+}
+#endif
 
 static void opal_proc_construct(opal_proc_t *proc)
 {
@@ -106,11 +140,31 @@ opal_compare_proc_fct_t opal_compare_proc = opal_compare_opal_procs;
 
 opal_proc_t *opal_proc_local_get(void)
 {
+#if OPAL_HAVE_PARLIB_DTLS
+    if (!opal_proc_local_dtls_ready) {
+        opal_proc_local_dtls_init();
+    }
+    if (opal_proc_local_dtls_ready > 0) {
+        opal_proc_t *proc = (opal_proc_t *) get_dtls(opal_proc_local_dtls_key);
+        if (NULL != proc) {
+            return proc;
+        }
+    }
+#endif
     return opal_proc_my_name;
 }
 
 int opal_proc_local_set(opal_proc_t *proc)
 {
+#if OPAL_HAVE_PARLIB_DTLS
+    if (!opal_proc_local_dtls_ready) {
+        opal_proc_local_dtls_init();
+    }
+    if (opal_proc_local_dtls_ready > 0) {
+        set_dtls(opal_proc_local_dtls_key, (NULL == proc) ? &opal_local_proc : proc);
+        return OPAL_SUCCESS;
+    }
+#endif
     if (proc != opal_proc_my_name) {
         if (NULL != proc)
             OBJ_RETAIN(proc);
@@ -123,6 +177,33 @@ int opal_proc_local_set(opal_proc_t *proc)
             opal_proc_my_name = &opal_local_proc;
         }
     }
+    return OPAL_SUCCESS;
+}
+
+int opal_proc_local_set_name(opal_process_name_t *name)
+{
+    opal_proc_t *proc;
+
+    if (NULL == name) {
+        return opal_proc_local_set(NULL);
+    }
+
+#if OPAL_HAVE_PARLIB_DTLS
+    if (!opal_proc_local_dtls_ready) {
+        opal_proc_local_dtls_init();
+    }
+    if (opal_proc_local_dtls_ready > 0) {
+        proc = OBJ_NEW(opal_proc_t);
+        if (NULL == proc) {
+            return OPAL_ERR_OUT_OF_RESOURCE;
+        }
+        proc->proc_name = *name;
+        set_dtls(opal_proc_local_dtls_key, proc);
+        return OPAL_SUCCESS;
+    }
+#endif
+
+    opal_proc_set_name(name);
     return OPAL_SUCCESS;
 }
 

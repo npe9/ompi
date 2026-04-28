@@ -31,8 +31,10 @@
 #include <rdma/fi_cm.h>
 #include <rdma/fi_domain.h>
 #include <rdma/fi_endpoint.h>
+#include <rdma/fi_eq.h>
 #include <rdma/fi_errno.h>
 #include <rdma/fi_tagged.h>
+#include <sys/epoll.h>
 
 #include "ompi_config.h"
 #include "ompi/proc/proc.h"
@@ -52,6 +54,10 @@
 #include "mtl_ofi_endpoint.h"
 #include "mtl_ofi_compat.h"
 
+#if HAVE_LITHE
+#include <parlib/reactor.h>
+#endif
+
 BEGIN_C_DECLS
 
 extern mca_mtl_ofi_module_t ompi_mtl_ofi;
@@ -70,7 +76,13 @@ extern int ompi_mtl_ofi_add_comm(struct mca_mtl_base_module_t *mtl,
 extern int ompi_mtl_ofi_del_comm(struct mca_mtl_base_module_t *mtl,
                                  struct ompi_communicator_t *comm);
 
+static inline int ompi_mtl_ofi_comm_rank(struct ompi_communicator_t *comm)
+{
+    return ompi_comm_rank(comm);
+}
+
 int ompi_mtl_ofi_progress_no_inline(void);
+int ompi_mtl_ofi_progress_block_no_inline(void);
 
 #if OPAL_HAVE_THREAD_LOCAL
 extern opal_thread_local int ompi_mtl_ofi_per_thread_ctx;
@@ -79,6 +91,83 @@ extern opal_thread_local int ompi_mtl_ofi_per_thread_ctx;
 #define MCA_MTL_OFI_CID_NOT_EXCHANGED 2
 #define MCA_MTL_OFI_CID_EXCHANGING    1 
 #define MCA_MTL_OFI_CID_EXCHANGED     0
+
+static inline void ompi_mtl_ofi_init_cq_attr(struct fi_cq_attr *cq_attr)
+{
+    cq_attr->format = FI_CQ_FORMAT_TAGGED;
+    cq_attr->size = ompi_mtl_ofi.ofi_progress_event_count;
+#if HAVE_LITHE
+    cq_attr->wait_obj = FI_WAIT_FD;
+#endif
+}
+
+static inline int ompi_mtl_ofi_open_cq(struct fi_cq_attr *cq_attr,
+                                       struct fid_cq **cq, int *cq_wait_fd)
+{
+    *cq_wait_fd = -1;
+    int ret = fi_cq_open(ompi_mtl_ofi.domain, cq_attr, cq, NULL);
+#if HAVE_LITHE
+    if (0 == ret) {
+        enum fi_wait_obj wait_obj = FI_WAIT_UNSPEC;
+        ret = fi_control(&(*cq)->fid, FI_GETWAITOBJ, &wait_obj);
+        if (0 == ret) {
+            if (FI_WAIT_FD == wait_obj) {
+                int wait_fd = -1;
+                ret = fi_control(&(*cq)->fid, FI_GETWAIT, &wait_fd);
+                if (0 == ret) {
+                    *cq_wait_fd = wait_fd;
+                    return 0;
+                }
+                opal_output_verbose(1, opal_common_ofi.output,
+                                    "%s:%d: FI_GETWAIT failed after FI_WAIT_FD fi_cq_open: %s(%d); "
+                                    "disabling Lithe blocking progress\n",
+                                    __FILE__, __LINE__, fi_strerror(-ret), ret);
+                ompi_mtl_ofi.progress_block_enabled = false;
+                return 0;
+            }
+            return 0;
+        }
+        opal_output_verbose(1, opal_common_ofi.output,
+                            "%s:%d: FI_GETWAITOBJ failed after fi_cq_open: %s(%d); "
+                            "disabling Lithe blocking progress\n",
+                            __FILE__, __LINE__, fi_strerror(-ret), ret);
+        ompi_mtl_ofi.progress_block_enabled = false;
+        return 0;
+    }
+
+    /* The Lithe block callback is only correct for fd-backed CQ waits:
+     * parlib parks the continuation on FI_GETWAIT's fd and the normal OMPI
+     * progress loop drains completions after readiness. If the provider rejects
+     * FI_WAIT_FD, keep OFI usable but only enable blocking progress if the
+     * provider's fallback confirms FI_WAIT_FD via FI_GETWAITOBJ/FI_GETWAIT. */
+    opal_output_verbose(1, opal_common_ofi.output,
+                        "%s:%d: FI_WAIT_FD fi_cq_open failed: %s(%d); "
+                        "retrying with FI_WAIT_UNSPEC\n",
+                        __FILE__, __LINE__, fi_strerror(-ret), ret);
+    cq_attr->wait_obj = FI_WAIT_UNSPEC;
+    ret = fi_cq_open(ompi_mtl_ofi.domain, cq_attr, cq, NULL);
+    if (0 == ret) {
+        enum fi_wait_obj wait_obj = FI_WAIT_UNSPEC;
+        int control_ret = fi_control(&(*cq)->fid, FI_GETWAITOBJ, &wait_obj);
+        if (0 == control_ret && FI_WAIT_FD == wait_obj) {
+            int wait_fd = -1;
+            control_ret = fi_control(&(*cq)->fid, FI_GETWAIT, &wait_fd);
+            if (0 == control_ret) {
+                *cq_wait_fd = wait_fd;
+            } else {
+                ompi_mtl_ofi.progress_block_enabled = false;
+            }
+        } else {
+            ompi_mtl_ofi.progress_block_enabled = false;
+        }
+    } else {
+        ompi_mtl_ofi.progress_block_enabled = false;
+    }
+#else
+    (void)cq_wait_fd;
+#endif
+    return ret;
+}
 
 typedef struct {
     uint32_t c_index:30;
@@ -129,29 +218,20 @@ OPAL_LIKELY(!opal_mutex_atomic_trylock(&ompi_mtl_ofi.ofi_ctxt[ctxt_id].context_l
 opal_mutex_atomic_unlock(&ompi_mtl_ofi.ofi_ctxt[ctxt_id].context_lock)
 
 __opal_attribute_always_inline__ static inline int
-ompi_mtl_ofi_context_progress(int ctxt_id)
+ompi_mtl_ofi_context_process_cq(int ctxt_id, struct fi_cq_tagged_entry *wc, ssize_t ret)
 {
     int count = 0, i, events_read;
     ompi_mtl_ofi_request_t *ofi_req = NULL;
     struct fi_cq_err_entry error = { 0 };
-    ssize_t ret;
-    struct fi_cq_tagged_entry ompi_mtl_ofi_wc[MTL_OFI_MAX_PROG_EVENT_COUNT];
 
-    /**
-     * Read the work completions from the CQ.
-     * From the completion's op_context, we get the associated OFI request.
-     * Call the request's callback.
-     */
-    ret = fi_cq_read(ompi_mtl_ofi.ofi_ctxt[ctxt_id].cq, (void *)&ompi_mtl_ofi_wc,
-                     ompi_mtl_ofi.ofi_progress_event_count);
     if (ret > 0) {
         count+= ret;
         events_read = ret;
         for (i = 0; i < events_read; i++) {
-            if (NULL != ompi_mtl_ofi_wc[i].op_context) {
-                ofi_req = TO_OFI_REQ(ompi_mtl_ofi_wc[i].op_context);
+            if (NULL != wc[i].op_context) {
+                ofi_req = TO_OFI_REQ(wc[i].op_context);
                 assert(ofi_req);
-                ret = ofi_req->event_callback(&ompi_mtl_ofi_wc[i], ofi_req);
+                ret = ofi_req->event_callback(&wc[i], ofi_req);
                 if (OMPI_SUCCESS != ret) {
                     opal_output(0, "%s:%d: Error returned by request event callback: %zd.\n"
                                    "*** The Open MPI OFI MTL is aborting the MPI job (via exit(3)).\n",
@@ -211,6 +291,53 @@ ompi_mtl_ofi_context_progress(int ctxt_id)
 }
 
 __opal_attribute_always_inline__ static inline int
+ompi_mtl_ofi_context_progress(int ctxt_id)
+{
+    ssize_t ret;
+    struct fi_cq_tagged_entry ompi_mtl_ofi_wc[MTL_OFI_MAX_PROG_EVENT_COUNT];
+
+    /**
+     * Read the work completions from the CQ.
+     * From the completion's op_context, we get the associated OFI request.
+     * Call the request's callback.
+     */
+    ret = fi_cq_read(ompi_mtl_ofi.ofi_ctxt[ctxt_id].cq, (void *)&ompi_mtl_ofi_wc,
+                     ompi_mtl_ofi.ofi_progress_event_count);
+    return ompi_mtl_ofi_context_process_cq(ctxt_id, ompi_mtl_ofi_wc, ret);
+}
+
+__opal_attribute_always_inline__ static inline int
+ompi_mtl_ofi_context_progress_block(int ctxt_id)
+{
+    int wait_fd = ompi_mtl_ofi.ofi_ctxt[ctxt_id].cq_wait_fd;
+    int count = 0;
+
+    if (wait_fd < 0) {
+        return 0;
+    }
+
+    /* opal_progress() polls low-priority callbacks only periodically. Before
+     * parking, force one nonblocking CQ drain so short collective reductions do
+     * not pay an epoll handoff just because this progress tick skipped OFI. */
+    count = ompi_mtl_ofi_context_progress(ctxt_id);
+    if (count > 0) {
+        return count;
+    }
+
+    /* Lithe request waits are continuations, not pthread waits. Use OFI only
+     * for its waitable readiness fd, then drain completions through OMPI's
+     * normal CQ processor after readiness. This avoids both busy polling and
+     * an unbounded fi_cq_sread() that can sleep before non-CQ collective state
+     * has been advanced. */
+    int rev = parlib_reactor_wait(wait_fd, EPOLLIN | EPOLLERR | EPOLLHUP, -1);
+    if (rev <= 0) {
+        return 0;
+    }
+
+    return ompi_mtl_ofi_context_progress(ctxt_id);
+}
+
+__opal_attribute_always_inline__ static inline int
 ompi_mtl_ofi_progress(void)
 {
     int count = 0, ctxt_id = 0, i;
@@ -250,6 +377,18 @@ ompi_mtl_ofi_progress(void)
         }
     }
 #endif
+
+    return count;
+}
+
+__opal_attribute_always_inline__ static inline int
+ompi_mtl_ofi_progress_block(void)
+{
+    int count = 0, ctxt_id = 0;
+
+    get_thread_context(&ctxt_id);
+
+    count += ompi_mtl_ofi_context_progress_block(ctxt_id);
 
     return count;
 }
@@ -747,7 +886,7 @@ ompi_mtl_ofi_send_excid(struct mca_mtl_base_module_t *mtl,
     sep_peer_fiaddr = fi_rx_addr(endpoint->peer_fiaddr, ctxt_id, ompi_mtl_ofi.rx_ctx_bits);
 
     start->hdr_cid = comm->c_contextid;
-    start->hdr_src = comm->c_my_rank;
+    start->hdr_src = ompi_mtl_ofi_comm_rank(comm);
     start->hdr_src_c_index = comm->c_index;
     start->ofi_cq_data = ofi_cq_data;
     if (mtl_comm->c_index_vec[dest].c_index_state > MCA_MTL_OFI_CID_EXCHANGED) {
@@ -773,7 +912,7 @@ ompi_mtl_ofi_send_excid(struct mca_mtl_base_module_t *mtl,
             MTL_OFI_RETRY_UNTIL_DONE(fi_injectdata(ompi_mtl_ofi.ofi_ctxt[0].tx_ep,
                                             start,
                                             length,
-                                            comm->c_my_rank,
+                                            ompi_mtl_ofi_comm_rank(comm),
                                             sep_peer_fiaddr), ret);
         } else {
             MTL_OFI_RETRY_UNTIL_DONE(fi_inject(ompi_mtl_ofi.ofi_ctxt[0].tx_ep,
@@ -794,7 +933,7 @@ ompi_mtl_ofi_send_excid(struct mca_mtl_base_module_t *mtl,
                                           start,
                                           length,
                                           NULL,
-                                          comm->c_my_rank,
+                                          ompi_mtl_ofi_comm_rank(comm),
                                           sep_peer_fiaddr,
                                           (void *) &ofi_req->ctx), ret);
         } else {
@@ -909,7 +1048,7 @@ ompi_mtl_ofi_send_generic(struct mca_mtl_base_module_t *mtl,
         src_addr = sep_peer_fiaddr;
     } else {
         match_bits = mtl_ofi_create_send_tag(c_index_for_tag,
-                                             comm->c_my_rank, tag);
+                                             ompi_mtl_ofi_comm_rank(comm), tag);
         /* src_addr is ignored when FI_DIRECTED_RECV is not supported */
     }
 
@@ -930,7 +1069,7 @@ ompi_mtl_ofi_send_generic(struct mca_mtl_base_module_t *mtl,
             MTL_OFI_RETRY_UNTIL_DONE(fi_tinjectdata(ompi_mtl_ofi.ofi_ctxt[ctxt_id].tx_ep,
                                             start,
                                             length,
-                                            comm->c_my_rank,
+                                            ompi_mtl_ofi_comm_rank(comm),
                                             sep_peer_fiaddr,
                                             match_bits), ret);
         } else {
@@ -963,7 +1102,7 @@ ompi_mtl_ofi_send_generic(struct mca_mtl_base_module_t *mtl,
                                           start,
                                           length,
                                           (NULL == ofi_req.mr) ? NULL : ofi_req.mr->mem_desc,
-                                          comm->c_my_rank,
+                                          ompi_mtl_ofi_comm_rank(comm),
                                           sep_peer_fiaddr,
                                           match_bits,
                                           (void *) &ofi_req.ctx), ret);
@@ -1155,7 +1294,7 @@ ompi_mtl_ofi_isend_generic(struct mca_mtl_base_module_t *mtl,
         match_bits = mtl_ofi_create_send_tag_CQD(c_index_for_tag, tag);
     } else {
         match_bits = mtl_ofi_create_send_tag(c_index_for_tag,
-                          comm->c_my_rank, tag);
+                          ompi_mtl_ofi_comm_rank(comm), tag);
         /* src_addr is ignored when FI_DIRECTED_RECV  is not supported */
     }
 
@@ -1182,7 +1321,7 @@ ompi_mtl_ofi_isend_generic(struct mca_mtl_base_module_t *mtl,
             ret = fi_tinjectdata(ompi_mtl_ofi.ofi_ctxt[ctxt_id].tx_ep,
                     start,
                     length,
-                    comm->c_my_rank,
+                    ompi_mtl_ofi_comm_rank(comm),
                     sep_peer_fiaddr,
                     match_bits);
         } else {
@@ -1217,7 +1356,7 @@ ompi_mtl_ofi_isend_generic(struct mca_mtl_base_module_t *mtl,
                                       start,
                                       length,
                                       (NULL == ofi_req->mr) ? NULL : ofi_req->mr->mem_desc,
-                                      comm->c_my_rank,
+                                      ompi_mtl_ofi_comm_rank(comm),
                                       sep_peer_fiaddr,
                                       match_bits,
                                       (void *) &ofi_req->ctx), ret);

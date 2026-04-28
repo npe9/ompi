@@ -49,6 +49,13 @@ static const char *dash_line
 static int output_stream = -1;
 static char **search_dirs = NULL;
 static bool opal_help_want_aggregate = true;
+/* Lithe threads component clears this to avoid PMIx_Log_nb blocking (Flux multinode). */
+static int opal_show_help_use_pmix_log = 1;
+
+void opal_show_help_set_use_pmix_log(int use)
+{
+    opal_show_help_use_pmix_log = use ? 1 : 0;
+}
 
 /*
  * Local functions
@@ -136,6 +143,15 @@ static void opal_show_help_cbfunc(pmix_status_t status, void *cbdata)
 static void local_delivery(const char *file, const char *topic, char *msg) {
     pmix_info_t *info, *dirs = NULL;
     int ninfo = 0, ndirs = 0;
+
+    if (!opal_show_help_use_pmix_log) {
+        opal_show_help_output(msg);
+        free(msg);
+        (void) file;
+        (void) topic;
+        return;
+    }
+
     PMIX_INFO_CREATE(info, 1);
     PMIX_INFO_LOAD(&info[ninfo++], PMIX_LOG_STDERR, msg, PMIX_STRING);
 

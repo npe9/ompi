@@ -36,6 +36,7 @@
 #define OMPI_COMMUNICATOR_H
 
 #include "ompi_config.h"
+#include <stdlib.h>
 #include "opal/class/opal_object.h"
 #include "opal/class/opal_hash_table.h"
 #include "opal/util/info_subscriber.h"
@@ -496,6 +497,9 @@ static inline int ompi_comm_invalid (const ompi_communicator_t* comm)
  */
 static inline int ompi_comm_rank (const ompi_communicator_t* comm)
 {
+    if (comm == &ompi_mpi_comm_world.comm && NULL != getenv("OMPI_LITHE_CONTEXT_LOCAL_PROC")) {
+        return (int) opal_proc_local_get()->proc_name.vpid;
+    }
     return comm->c_my_rank;
 }
 

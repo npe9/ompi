@@ -593,6 +593,10 @@ AC_DEFUN([OPAL_SETUP_WRAPPER_FINAL],[
 
        dnl Add the user-provided flags
        OPAL_FLAGS_APPEND_UNIQ([OMPI_WRAPPER_LDFLAGS], [${with_wrapper_ldflags}])
+       dnl Static-only (and static link paths): user wrapper LDFLAGS must also land in
+       dnl OMPI_WRAPPER_LDFLAGS_STATIC or mpicxx emits linker_flags_static without e.g.
+       dnl -Wl,-wrap,poll even when linker_flags has them (lithified parlib / libevent).
+       OPAL_FLAGS_APPEND_UNIQ([OMPI_WRAPPER_LDFLAGS_STATIC], [${with_wrapper_ldflags}])
        OPAL_FLAGS_APPEND_MOVE([OMPI_WRAPPER_LIBS], [${with_wrapper_libs}])
 
        dnl fortran FTW!

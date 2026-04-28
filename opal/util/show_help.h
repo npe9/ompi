@@ -167,6 +167,15 @@ OPAL_DECLSPEC char *opal_show_help_vstring(const char *filename, const char *top
  */
 OPAL_DECLSPEC int opal_show_help_add_dir(const char *directory);
 
+/**
+ * If zero, opal_show_help delivers messages directly to stderr (opal_output)
+ * instead of PMIx_Log_nb. The Lithe threads component sets this to 0 at open
+ * to avoid blocking PMIX_PTL_SEND_RECV to the Flux PMIx server during MPI_Init
+ * (multinode deadlock with sync modex). Set OPAL_SHOW_HELP_FORCE_PMIX_LOG in
+ * the environment before MPI_Init to keep the PMIx aggregation path on Lithe.
+ */
+OPAL_DECLSPEC void opal_show_help_set_use_pmix_log(int use);
+
 END_C_DECLS
 
 #endif

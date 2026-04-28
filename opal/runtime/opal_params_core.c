@@ -89,7 +89,9 @@ static bool opal_register_util_done = false;
 
 static char *opal_var_dump_color_string = NULL;
 
-static char *opal_var_dump_color_keys[OPAL_VAR_DUMP_COLOR_KEY_COUNT] = {
+/* opal_argv_count / opal_argv_join_range require a NULL-terminated argv; without a
+ * trailing NULL, opal_argv_count walks past the end of this static array. */
+static char *opal_var_dump_color_keys[OPAL_VAR_DUMP_COLOR_KEY_COUNT + 1] = {
     [OPAL_VAR_DUMP_COLOR_VAR_NAME] = "name",
     [OPAL_VAR_DUMP_COLOR_VAR_VALUE] = "value",
     [OPAL_VAR_DUMP_COLOR_VALID_VALUES] = "valid_values"

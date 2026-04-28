@@ -162,6 +162,15 @@ mca_part_persist_progress(void)
     int err;
     size_t i;
 
+    /* Lock-free fast path: this callback is registered unconditionally on
+     * every opal_progress() tick, but most applications never call any
+     * partitioned-comm function. init_world is -1 until psend_init/precv_init
+     * runs (transitions are monotonic). Bail out before taking any locks or
+     * doing atomics so opal_progress() stays cheap. Critical under Lithe
+     * where OPAL_THREAD_LOCK pulls in lithe_mutex / mcs_pdr_lock per call. */
+    if (__atomic_load_n(&ompi_part_persist.init_world, __ATOMIC_RELAXED) == -1)
+        return OMPI_SUCCESS;
+
     /* prevent re-entry, */
     int block_entry = opal_atomic_add_fetch_32(&(ompi_part_persist.block_entry), 1);
     if(1 < block_entry)

@@ -42,8 +42,9 @@ AC_DEFUN([OPAL_CHECK_COMPILER], [
     f=fopen("conftestval", "w");
     if (!f) exit(1);
     fprintf (f, "%d", PLATFORM_COMPILER_$1);
-            ]])], [
+            ]])            ], [
                 opal_cv_compiler_$1=`cat conftestval`
+                AS_IF([test "x$opal_cv_compiler_$1" = x], [opal_cv_compiler_$1=0])
             ], [
                 opal_cv_compiler_$1=0
             ], [

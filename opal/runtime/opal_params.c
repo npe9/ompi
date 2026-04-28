@@ -70,6 +70,13 @@ int opal_register_params(void)
 
 #if defined(HAVE_SCHED_YIELD)
     opal_progress_yield_when_idle = false;
+#if HAVE_LITHE
+    /* Lithe request waits use opal_progress_block() to park the current
+     * continuation on OFI's fd-backed CQ wait. A blind yield here just adds a
+     * scheduler round trip before the real block and recreates progress-loop
+     * contention. Leave the MCA default off; set it explicitly only for
+     * debugging older nonblocking progress paths. */
+#endif
     ret = mca_base_var_register("opal", "opal", "progress", "yield_when_idle",
                                 "Yield the processor when waiting on progress",
                                 MCA_BASE_VAR_TYPE_BOOL, NULL, 0, MCA_BASE_VAR_FLAG_SETTABLE,

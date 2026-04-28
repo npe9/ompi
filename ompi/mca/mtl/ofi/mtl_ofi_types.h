@@ -29,6 +29,7 @@ typedef struct mca_mtl_ofi_context_t {
 
     /* Completion queue */
     struct fid_cq *cq;
+    int cq_wait_fd;
 
     /* Thread locking */
     opal_mutex_t context_lock;
@@ -99,6 +100,7 @@ typedef struct mca_mtl_ofi_module_t {
     struct ompi_mtl_ofi_symtable sym_table;
 
     bool is_initialized;
+    bool progress_block_enabled;
     bool has_posted_initial_buffer;
     bool hmem_needs_reg;
 

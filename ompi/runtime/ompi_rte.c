@@ -24,6 +24,8 @@
 #include <string.h>
 #include <stdio.h>
 #include <ctype.h>
+#include <errno.h>
+#include <limits.h>
 #ifdef HAVE_SYS_TYPES_H
 #include <sys/types.h>
 #endif  /* HAVE_SYS_TYPES_H */
@@ -86,6 +88,24 @@ static int _setup_proc_session_dir(char **sdir);
 static bool fns_init=false;
 static opal_tsd_tracked_key_t print_args_tsd_key;
 static char* opal_print_args_null = "NULL";
+
+static uint32_t ompi_lithe_context_ranks_per_host(void)
+{
+    char *env = getenv("LITHE_CONTEXT_RANKS_PER_HOST");
+    char *end = NULL;
+    unsigned long value;
+
+    if (NULL == env || '\0' == *env) {
+        return 0;
+    }
+    errno = 0;
+    value = strtoul(env, &end, 10);
+    if (errno || end == env || value < 2 || value > UINT32_MAX) {
+        return 0;
+    }
+    return (uint32_t) value;
+}
+
 typedef struct {
     char *buffers[OPAL_PRINT_NAME_ARG_NUM_BUFS];
     int cntr;
@@ -549,6 +569,8 @@ int ompi_rte_init(int *pargc, char ***pargv)
     pmix_status_t rc;
     char **tmp;
     bool singleton = false;
+    uint32_t lithe_ranks_per_host = 0;
+    uint32_t lithe_host_vpid = 0;
     const static char *pmi_sentinels[] = {"PMI_FD", /* SLURM PMI1,2 */
                                           "PMI_CONTROL_PORT", /* Cray Shasta */
                                           NULL};
@@ -627,6 +649,8 @@ int ompi_rte_init(int *pargc, char ***pargv)
     OPAL_PROC_MY_NAME.vpid = pname.vpid;
     opal_process_info.my_name.jobid = OPAL_PROC_MY_NAME.jobid;
     opal_process_info.my_name.vpid = OPAL_PROC_MY_NAME.vpid;
+    lithe_ranks_per_host = ompi_lithe_context_ranks_per_host();
+    lithe_host_vpid = opal_process_info.my_name.vpid;
     if (singleton) {
         opal_process_info.is_singleton = true;
     } else {
@@ -694,6 +718,15 @@ int ompi_rte_init(int *pargc, char ***pargv)
         }
     }
     opal_process_info.num_procs = u32;
+    if (lithe_ranks_per_host > 1) {
+        uint32_t logical_vpid = lithe_host_vpid * lithe_ranks_per_host;
+        opal_process_info.num_procs = u32 * lithe_ranks_per_host;
+        opal_process_info.my_name.vpid = logical_vpid;
+        OPAL_PROC_MY_NAME.vpid = logical_vpid;
+        opal_process_info.my_local_rank *= lithe_ranks_per_host;
+        opal_process_info.my_node_rank *= lithe_ranks_per_host;
+        setenv("OMPI_LITHE_CONTEXT_LOCAL_PROC", "1", 0);
+    }
 
     /* get universe size */
     OPAL_MODEX_RECV_VALUE_OPTIONAL(rc, PMIX_UNIV_SIZE,
@@ -790,6 +823,9 @@ int ompi_rte_init(int *pargc, char ***pargv)
                                    &pname, &u32ptr, PMIX_UINT32);
     if (PMIX_SUCCESS == rc) {
         opal_process_info.num_local_peers = u32 - 1;  // want number besides ourselves
+        if (lithe_ranks_per_host > 1) {
+            opal_process_info.num_local_peers = (u32 * lithe_ranks_per_host) - 1;
+        }
     }
 
     /* retrieve temp directories info */
@@ -889,6 +925,10 @@ int ompi_rte_init(int *pargc, char ***pargv)
             opal_process_info.num_local_peers = opal_argv_count(peers) - 1;
         } else {
             opal_process_info.num_local_peers = 1;
+        }
+        if (lithe_ranks_per_host > 1) {
+            opal_process_info.num_local_peers =
+                ((opal_process_info.num_local_peers + 1) * lithe_ranks_per_host) - 1;
         }
     }
     /* if my local rank if too high, then that's an error */
@@ -1037,11 +1077,15 @@ int ompi_rte_finalize(void)
     /* cleanup our internal nspace hack */
     opal_pmix_finalize_nspace_tracker();
 
-
-    opal_finalize ();
-
-    /* shutdown pmix */
+    /* Finalize the PMIx client *before* opal_finalize(). opal_finalize() runs
+     * mca_base_framework_close_list(), which closes opal_pmix_base_framework
+     * (registered in opal_init.c). Tearing down OPAL's PMIx framework while
+     * libpmix still needs it for PMIX_FINALIZE_CMD / bfrops pack caused SIGSEGV
+     * in PMIx_Finalize (NULL deref) after MPI work completed — especially visible
+     * under Flux with PMIX_MCA_bfrops=v4. */
     PMIx_Finalize(NULL, 0);
+
+    opal_finalize();
 
     return OMPI_SUCCESS;
 }

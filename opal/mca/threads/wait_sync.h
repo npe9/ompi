@@ -101,7 +101,12 @@ static inline int sync_wait_st(ompi_wait_sync_t *sync)
     opal_threads_base_wait_sync_list = sync;
 
     while (sync->count > 0) {
-        opal_progress();
+        int events = opal_progress();
+#if HAVE_LITHE
+        if (sync->count > 0 && events <= 0) {
+            opal_progress_block();
+        }
+#endif
     }
     opal_threads_base_wait_sync_list = NULL;
 

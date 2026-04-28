@@ -26,8 +26,13 @@
 #include "opal/mca/threads/mutex.h"
 #include "opal/mca/threads/tsd.h"
 
-/* Lithe is cooperatively scheduled so yield when idle */
-#define OPAL_THREAD_YIELD_WHEN_IDLE_DEFAULT true
+/* Match pthreads default (false): MPI single-threaded apps (e.g. miniFE) have
+ * one uthread per process, so opal_progress yielding to the scheduler per call
+ * burns time bouncing through __thread_dequeue+spin_pdr_lock with nothing else
+ * to run. Vanilla pthreads gets the fast spin path; we want parity. Apps that
+ * actually want yielding (real M:N concurrency with multiple uthreads) can
+ * still re-enable via MCA: OMPI_MCA_mpi_yield_when_idle=1. */
+#define OPAL_THREAD_YIELD_WHEN_IDLE_DEFAULT false
 
 BEGIN_C_DECLS
 

@@ -312,6 +312,12 @@ ompi_mtl_ofi_progress_no_inline(void)
 	return ompi_mtl_ofi_progress();
 }
 
+int
+ompi_mtl_ofi_progress_block_no_inline(void)
+{
+	return ompi_mtl_ofi_progress_block();
+}
+
 static struct fi_info*
 select_ofi_provider(struct fi_info *providers,
                     char **include_list, char **exclude_list)
@@ -500,8 +506,7 @@ static int ompi_mtl_ofi_init_regular_ep(struct fi_info * prov, int universe_size
     int ret = OMPI_SUCCESS;
     struct fi_av_attr av_attr = {0};
     struct fi_cq_attr cq_attr = {0};
-    cq_attr.format = FI_CQ_FORMAT_TAGGED;
-    cq_attr.size = ompi_mtl_ofi.ofi_progress_event_count;
+    ompi_mtl_ofi_init_cq_attr(&cq_attr);
 
     /* Override any user defined setting */
     ompi_mtl_ofi.num_ofi_contexts = 1;
@@ -546,7 +551,8 @@ static int ompi_mtl_ofi_init_regular_ep(struct fi_info * prov, int universe_size
     ompi_mtl_ofi.ofi_ctxt[0].tx_ep = ompi_mtl_ofi.sep;
     ompi_mtl_ofi.ofi_ctxt[0].rx_ep = ompi_mtl_ofi.sep;
 
-    ret = fi_cq_open(ompi_mtl_ofi.domain, &cq_attr, &ompi_mtl_ofi.ofi_ctxt[0].cq, NULL);
+    ret = ompi_mtl_ofi_open_cq(&cq_attr, &ompi_mtl_ofi.ofi_ctxt[0].cq,
+                               &ompi_mtl_ofi.ofi_ctxt[0].cq_wait_fd);
     if (ret) {
         MTL_OFI_LOG_FI_ERR(ret, "fi_cq_open failed");
         return ret;
@@ -1065,8 +1071,20 @@ select_prov:
             ompi_mtl_ofi.num_ofi_contexts = max_ofi_ctxts;
         }
 
+#if HAVE_LITHE
+        ompi_mtl_ofi.progress_block_enabled = true;
+#else
+        ompi_mtl_ofi.progress_block_enabled = false;
+#endif
+
         ret = ompi_mtl_ofi_init_sep(prov, universe_size);
     } else {
+#if HAVE_LITHE
+        ompi_mtl_ofi.progress_block_enabled = true;
+#else
+        ompi_mtl_ofi.progress_block_enabled = false;
+#endif
+
         ret = ompi_mtl_ofi_init_regular_ep(prov, universe_size);
     }
 
@@ -1183,6 +1201,9 @@ ompi_mtl_ofi_finalize(struct mca_mtl_base_module_t *mtl)
     ssize_t ret;
 
     opal_progress_unregister(ompi_mtl_ofi_progress_no_inline);
+#if HAVE_LITHE
+    opal_progress_set_block_callback(NULL);
+#endif
 
     /* Close all the OFI objects */
     if ((ret = fi_close((fid_t)ompi_mtl_ofi.sep))) {

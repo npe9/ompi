@@ -335,7 +335,7 @@ int ompi_mpi_init(int argc, char **argv, int requested, int *provided,
             // thread has completed.
             if (reinit_ok) {
                 while (ompi_mpi_state < OMPI_MPI_STATE_INIT_COMPLETED) {
-                    usleep(1);
+                    opal_thread_yield();
                 }
                 return MPI_SUCCESS;
             }

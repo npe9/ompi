@@ -473,7 +473,6 @@ static int compute_dev_distances(pmix_device_distance_t **distances,
     size_t ninfo;
     pmix_info_t *info;
     pmix_cpuset_t cpuset;
-    pmix_topology_t pmix_topo = PMIX_TOPOLOGY_STATIC_INIT;
     pmix_device_type_t type = PMIX_DEVTYPE_OPENFABRICS |
       PMIX_DEVTYPE_NETWORK;
 
@@ -490,18 +489,16 @@ static int compute_dev_distances(pmix_device_distance_t **distances,
         return OPAL_ERR_NOT_BOUND;
     }
 
-    /* load the PMIX topology - this just loads a pointer to
-     * the local topology held in PMIx, so you must not
-     * free it */
-    ret = PMIx_Load_topology(&pmix_topo);
-    if (PMIX_SUCCESS != ret) {
-        goto out;
-    }
-
+    /* Pass NULL for topology and cpuset so PMIx uses pmix_globals.*. If local
+     * compute fails and the client relays to the server, OpenPMIx clears
+     * pointers that match those globals before packing (pmix_client_topology.c),
+     * so the wire form is NULL/empty and the server uses its own topology/binding.
+     * Do not pass a stack pmix_cpuset_t from PMIx_Get_cpuset here: packing it for
+     * relay can fail (e.g. hwloc_bitmap_list_asprintf) even after the bound checks. */
     ninfo = 1;
     info = PMIx_Info_create(ninfo);
     PMIx_Info_load(&info[0], PMIX_DEVICE_TYPE, &type, PMIX_DEVTYPE);
-    ret = PMIx_Compute_distances(&pmix_topo, &cpuset, info, ninfo, distances,
+    ret = PMIx_Compute_distances(NULL, NULL, info, ninfo, distances,
                                  ndist);
     PMIx_Info_free(info, ninfo);
 
@@ -709,12 +706,14 @@ static int count_providers(struct fi_info *provider_list)
  *                              about the current process. used to get
  *                              num_local_peers, myprocid.rank.
  *
- * @return package rank or myprocid.rank
+ * @return package rank or local rank
  *
  * If successful, returns PMIX_PACKAGE_RANK, or an
  * equivalent calculated package rank.
- * otherwise falls back to using opal_process_info.myprocid.rank
- * this can affect performance, but is unlikely to happen.
+ * otherwise falls back to using opal_process_info.my_local_rank.  Flux PMIx
+ * does not always publish PMIX_PACKAGE_RANK or PMIX_LOCALITY_STRING, but it
+ * does publish PMIX_LOCAL_RANK; using local rank preserves per-node NIC striping
+ * much better than global rank when there are multiple equidistant NICs.
  */
 static uint32_t get_package_rank(opal_process_info_t *process_info)
 {
@@ -726,6 +725,7 @@ static uint32_t get_package_rank(opal_process_info_t *process_info)
     char **peers = NULL;
     char *local_peers = NULL;
     char *locality_string = NULL;
+    uint32_t fallback_rank = (uint32_t) process_info->my_local_rank;
 
     pname.jobid = OPAL_PROC_MY_NAME.jobid;
     pname.vpid = OPAL_VPID_WILDCARD;
@@ -757,7 +757,8 @@ static uint32_t get_package_rank(opal_process_info_t *process_info)
     for (i = 0; NULL != peers[i]; i++) {
         pname.vpid = strtoul(peers[i], NULL, 10);
 
-        if ((uint16_t) pname.vpid == process_info->my_local_rank) {
+        if (pname.vpid == process_info->myprocid.rank) {
+            opal_argv_free(peers);
             return ranks_on_package;
         }
 
@@ -775,17 +776,22 @@ static uint32_t get_package_rank(opal_process_info_t *process_info)
         free(locality_string);
         locality_string = NULL;
 
-        if ((uint16_t) pname.vpid == process_info->myprocid.rank) {
-            return ranks_on_package;
-        }
-
         if (relative_locality & OPAL_PROC_ON_SOCKET) {
             ranks_on_package++;
         }
     }
 err:
-    opal_show_help("help-common-ofi.txt", "package_rank failed", true);
-    return (uint32_t) process_info->myprocid.rank;
+    if (NULL != locality_string) {
+        free(locality_string);
+    }
+    if (NULL != peers) {
+        opal_argv_free(peers);
+    }
+    if (opal_common_ofi_verbose_level > 0) {
+        opal_show_help("help-common-ofi.txt", "package_rank failed", true,
+                       opal_common_ofi_verbose_level);
+    }
+    return fallback_rank;
 }
 
 struct fi_info *opal_common_ofi_select_provider(struct fi_info *provider_list,

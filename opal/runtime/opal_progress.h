@@ -150,6 +150,7 @@ OPAL_DECLSPEC void opal_progress_set_event_poll_rate(int microseconds);
  * @return         Number of events progressed during the callback
  */
 typedef int (*opal_progress_callback_t)(void);
+typedef int (*opal_progress_block_callback_t)(void);
 
 /**
  * Register an event to be progressed
@@ -168,6 +169,9 @@ OPAL_DECLSPEC int opal_progress_register_lp(opal_progress_callback_t cb);
  * Please read the note in opal_progress_callback_t.
  */
 OPAL_DECLSPEC int opal_progress_unregister(opal_progress_callback_t cb);
+
+OPAL_DECLSPEC void opal_progress_set_block_callback(opal_progress_block_callback_t cb);
+OPAL_DECLSPEC int opal_progress_block(void);
 
 #if OPAL_ENABLE_DEBUG
 OPAL_DECLSPEC extern bool opal_progress_debug;

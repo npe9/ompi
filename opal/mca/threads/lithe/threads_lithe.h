@@ -24,6 +24,7 @@
 #include "opal_config.h"
 #include "opal/mca/threads/threads.h"
 #include "opal/mca/threads/lithe/threads_lithe_threads.h"
+#include <sched.h>
 #if defined(__GNUC__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-function"
@@ -109,6 +110,12 @@ lithe_context_t *opal_get_next_helper_context(void);
 OPAL_DECLSPEC void opal_threads_lithe_preinit(void);
 
 /**
+ * Create opal fork-join scheduler once, register it with PMIx, and enter it when
+ * a parent Lithe scheduler exists (lithe_sched_current() != NULL).
+ */
+OPAL_DECLSPEC void opal_threads_lithe_ensure_opal_fork_join_sched(void);
+
+/**
  * Ensure lithe threads component is initialized
  */
 static inline void opal_threads_lithe_ensure_init(void)
@@ -129,6 +136,7 @@ static inline void opal_thread_yield(void)
 {
     LITHE_ASSERT_VCORE();
     lithe_context_yield();
+    sched_yield();
 }
 
 END_C_DECLS

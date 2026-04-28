@@ -29,9 +29,10 @@
 #include "threads_lithe.h"
 #include "opal/mca/threads/thread.h"
 #include "opal/mca/threads/threads.h"
+#include "opal/util/show_help.h"
 
-#include <lithe/lithe.h>
 #include <lithe/fork_join_sched.h>
+#include <stdlib.h>
 
 /* Scheduler state - must match threads_lithe_module.c */
 extern lithe_fork_join_sched_t *opal_sched;
@@ -52,30 +53,22 @@ int opal_threads_lithe_open(void)
 {
     if (lithe_component_debug())
         fprintf(stderr, "[LITHE-COMPONENT] opal_threads_lithe_open() called!\n");
+    /* PMIx_Log_nb uses blocking PMIX_PTL_SEND_RECV to the Flux PMIx server; with Lithe
+     * vcores that can stall multinode MPI_Init after topology (show_help may run there).
+     * Direct stderr preserves help text without the server round-trip. Override:
+     * OPAL_SHOW_HELP_FORCE_PMIX_LOG=1 */
+    if (NULL == getenv("OPAL_SHOW_HELP_FORCE_PMIX_LOG")) {
+        opal_show_help_set_use_pmix_log(0);
+    }
     opal_threads_lithe_ensure_init();
     if (lithe_component_debug())
         fprintf(stderr, "[LITHE-COMPONENT] ensure_init() completed\n");
     
-    /* Enter scheduler HERE - before PMIx/libevent init.
-     * Only enter if we're already in a uthread context (lithe_sched_current() non-NULL).
-     * Otherwise defer to lazy enter in pmix_lithe_thread_create when first PMIx thread runs. */
-    if (!opal_sched) {
-        opal_sched = lithe_fork_join_sched_create();
-        if (lithe_component_debug())
-            fprintf(stderr, "[LITHE-COMPONENT] Created scheduler %p\n", (void*)opal_sched);
-    }
-    if (opal_sched && !opal_sched_entered) {
-        lithe_sched_t *cur = lithe_sched_current();
-        if (lithe_component_debug())
-            fprintf(stderr, "[LITHE-COMPONENT] cur=%p in_vcore=%d\n", (void*)cur, in_vcore_context());
-        if (cur != NULL) {
-            lithe_sched_enter((lithe_sched_t *)opal_sched);
-            opal_sched_entered = true;
-            if (lithe_component_debug())
-                fprintf(stderr, "[LITHE-COMPONENT] Entered scheduler\n");
-        } else if (lithe_component_debug()) {
-            fprintf(stderr, "[LITHE-COMPONENT] Deferring sched_enter (cur=NULL)\n");
-        }
+    /* Single path: create (if needed), register with PMIx, enter when parent sched exists. */
+    opal_threads_lithe_ensure_opal_fork_join_sched();
+    if (lithe_component_debug()) {
+        fprintf(stderr, "[LITHE-COMPONENT] opal_sched=%p entered=%d\n", (void *)opal_sched,
+                (int)opal_sched_entered);
     }
     /* Allow non-zero vcores to run uthreads (e.g. PMIx progress thread). Without this,
      * vcore 1+ spin in vcore_entry and the progress thread never runs -> PMIx init deadlock. */

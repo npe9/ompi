@@ -192,7 +192,7 @@ typedef uint32_t ompi_vpid_t;
 /* some local storage */
 OMPI_DECLSPEC extern hwloc_cpuset_t ompi_proc_applied_binding;
 
-#define OMPI_PROC_MY_NAME (&opal_process_info.my_name)
+#define OMPI_PROC_MY_NAME (&opal_proc_local_get()->proc_name)
 #define OMPI_NAME_WILDCARD  (&opal_name_wildcard)
 #define OMPI_PROC_MYID (&opal_process_info.myprocid)
 #define OMPI_PRINT_ID(a) ompi_pmix_print_id(a)
@@ -277,7 +277,10 @@ OMPI_DECLSPEC void ompi_rte_wait_for_debugger(void);
     do {                                                                    \
         while ((flg)) {                                                     \
             opal_progress();                                                \
-            usleep(100);                                                    \
+            /* usleep() blocks kernel threads; under Lithe vcores that can   \
+             * stall peer PMIx progress during modex. Yield the runtime     \
+             * thread instead (noop→sched_yield on pthreads). */           \
+            opal_thread_yield();                                            \
         }                                                                   \
     }while(0);
 
