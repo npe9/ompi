@@ -146,7 +146,7 @@ do {                                                                    \
                                              &(req_send)->req_base.req_convertor ); \
     (req_send)->req_base.req_ompi.req_mpi_object.comm = comm;           \
     (req_send)->req_base.req_ompi.req_status.MPI_SOURCE =               \
-        comm->c_my_rank;                                                \
+        ompi_comm_rank(comm);                                            \
     (req_send)->req_base.req_ompi.req_status.MPI_TAG = tag;             \
     (req_send)->req_base.req_ompi.req_status._ucount = count;           \
     (req_send)->req_send_mode = sendmode;                               \
@@ -177,7 +177,7 @@ do {                                                                    \
         &(req_send)->req_base.req_convertor );                          \
     (req_send)->req_base.req_ompi.req_mpi_object.comm = comm;           \
     (req_send)->req_base.req_ompi.req_status.MPI_SOURCE =               \
-        comm->c_my_rank;                                                \
+        ompi_comm_rank(comm);                                            \
     (req_send)->req_base.req_ompi.req_status.MPI_TAG = tag;             \
     (req_send)->req_base.req_ompi.req_status._ucount = count;           \
     (req_send)->req_send_mode = sendmode;                               \
@@ -210,7 +210,7 @@ do {                                                                    \
                                              &(req_send)->req_base.req_convertor ); \
     (req_send)->req_base.req_ompi.req_mpi_object.comm = comm;           \
     (req_send)->req_base.req_ompi.req_status.MPI_SOURCE =               \
-        comm->c_my_rank;                                                \
+        ompi_comm_rank(comm);                                            \
     (req_send)->req_base.req_ompi.req_status.MPI_TAG = tag;             \
     (req_send)->req_base.req_ompi.req_status._ucount = count;           \
     (req_send)->req_send_mode = sendmode;                               \
@@ -259,7 +259,7 @@ do {                                                                    \
     }                                                                   \
     (req_send)->req_base.req_ompi.req_mpi_object.comm = comm;           \
     (req_send)->req_base.req_ompi.req_status.MPI_SOURCE =               \
-        comm->c_my_rank;                                                \
+        ompi_comm_rank(comm);                                            \
     (req_send)->req_base.req_ompi.req_status.MPI_TAG = tag;             \
     (req_send)->req_base.req_ompi.req_status._ucount = count;           \
     (req_send)->req_send_mode = sendmode;                               \
