@@ -74,6 +74,9 @@ static opal_proc_t opal_local_proc = {{.opal_list_next = NULL, .opal_list_prev =
                                       .proc_flags = 0,
                                       .proc_convertor = NULL};
 static opal_proc_t *opal_proc_my_name = &opal_local_proc;
+
+opal_proc_local_changed_fn_t opal_proc_local_changed_hook = NULL;
+
 #if OPAL_HAVE_PARLIB_DTLS
 static dtls_key_t opal_proc_local_dtls_key;
 static volatile int opal_proc_local_dtls_ready;
@@ -199,11 +202,17 @@ int opal_proc_local_set_name(opal_process_name_t *name)
         }
         proc->proc_name = *name;
         set_dtls(opal_proc_local_dtls_key, proc);
+        if (NULL != opal_proc_local_changed_hook) {
+            opal_proc_local_changed_hook();
+        }
         return OPAL_SUCCESS;
     }
 #endif
 
     opal_proc_set_name(name);
+    if (NULL != opal_proc_local_changed_hook) {
+        opal_proc_local_changed_hook();
+    }
     return OPAL_SUCCESS;
 }
 

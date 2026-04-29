@@ -141,6 +141,10 @@ OPAL_DECLSPEC extern int opal_proc_local_set(opal_proc_t *proc);
 OPAL_DECLSPEC extern int opal_proc_local_set_name(opal_process_name_t *name);
 OPAL_DECLSPEC extern void opal_proc_set_name(opal_process_name_t *name);
 
+/** Optional callback after Lithe/etc. switches TLS-local proc identity (logical MPI ranks). */
+typedef void (*opal_proc_local_changed_fn_t)(void);
+OPAL_DECLSPEC extern opal_proc_local_changed_fn_t opal_proc_local_changed_hook;
+
 /**
  * Compare two processor name and return an integer greater than,
  * equal to, or less than 0, according as the proc_name of proc1

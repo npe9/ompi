@@ -741,6 +741,10 @@ int ompi_rte_init(int *pargc, char ***pargv)
         }
     }
     opal_process_info.univ_size = u32;
+    if (lithe_ranks_per_host > 1) {
+        /* PMIx universe is OS-process oriented; logical ranks span num_procs after RTE scaling */
+        opal_process_info.univ_size = opal_process_info.num_procs;
+    }
 
     /* get number of app contexts */
     pname.jobid = opal_process_info.my_name.jobid;

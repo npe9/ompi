@@ -41,6 +41,7 @@
 #include "opal/class/opal_pointer_array.h"
 #include "opal/mca/threads/threads.h"
 #include "opal/util/output.h"
+#include "opal/util/proc.h"
 #include "ompi/instance/instance.h"
 
 BEGIN_C_DECLS
@@ -148,6 +149,9 @@ OMPI_DECLSPEC extern struct opal_pointer_array_t ompi_group_f_to_c_table;
 OMPI_DECLSPEC extern struct ompi_predefined_group_t ompi_mpi_group_null;
 OMPI_DECLSPEC extern struct ompi_predefined_group_t *ompi_mpi_group_null_addr;
 
+/** mpi://WORLD dense group created for MPI_COMM_WORLD (single pointer for comparisons). */
+OMPI_DECLSPEC extern ompi_group_t *ompi_mpi_intrinsic_world_group;
+
 #if OPAL_ENABLE_FT_MPI
 /*
  * Global list of failed processes
@@ -234,6 +238,10 @@ static inline int ompi_group_size(ompi_group_t *group)
  */
 static inline int ompi_group_rank(ompi_group_t *group)
 {
+    if (NULL != ompi_mpi_intrinsic_world_group && group == ompi_mpi_intrinsic_world_group &&
+        NULL != getenv("OMPI_LITHE_CONTEXT_LOCAL_PROC")) {
+        return (int)opal_proc_local_get()->proc_name.vpid;
+    }
     return group->grp_my_rank;
 }
 

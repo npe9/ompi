@@ -89,6 +89,8 @@ OBJ_CLASS_INSTANCE(ompi_communicator_t, opal_infosubscriber_t,
    shortcut for finalize and abort. */
 int ompi_comm_num_dyncomm=0;
 
+ompi_group_t *ompi_mpi_intrinsic_world_group = NULL;
+
 static int ompi_comm_finalize (void);
 
 /*
@@ -213,6 +215,7 @@ int ompi_comm_init_mpi3 (void)
     ompi_mpi_comm_world.comm.c_index          = 0;
     ompi_mpi_comm_world.comm.c_my_rank      = group->grp_my_rank;
     ompi_mpi_comm_world.comm.c_local_group  = group;
+    ompi_mpi_intrinsic_world_group = group;
     ompi_mpi_comm_world.comm.c_remote_group = group;
     OBJ_RETAIN(ompi_mpi_comm_world.comm.c_remote_group);
     ompi_mpi_comm_world.comm.c_cube_dim     = opal_cube_dim ((int) group->grp_proc_count);
@@ -311,6 +314,7 @@ static int ompi_comm_finalize (void)
 
     if (ompi_comm_intrinsic_init) {
         /* tear down MPI-3 predefined communicators (not initialized unless using MPI_Init) */
+        ompi_mpi_intrinsic_world_group = NULL;
         /* Free the attributes on comm world. This is not done in the
          * destructor as we delete attributes in ompi_comm_free (which
          * is not called for comm world) */
