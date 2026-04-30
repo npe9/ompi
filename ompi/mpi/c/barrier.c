@@ -27,6 +27,7 @@
 #include "ompi/errhandler/errhandler.h"
 #include "ompi/memchecker.h"
 #include "ompi/runtime/ompi_spc.h"
+#include "ompi/runtime/ompi_lithe_world_coll.h"
 
 #if OMPI_BUILD_MPI_PROFILING
 #if OPAL_HAVE_WEAK_SYMBOLS
@@ -73,7 +74,9 @@ int MPI_Barrier(MPI_Comm comm)
 
   if (OMPI_COMM_IS_INTRA(comm)) {
     if (ompi_comm_size(comm) > 1) {
+      ompi_lithe_world_coll_lock(comm);
       err = comm->c_coll->coll_barrier(comm, comm->c_coll->coll_barrier_module);
+      ompi_lithe_world_coll_unlock(comm);
     }
   }
 
@@ -81,7 +84,9 @@ int MPI_Barrier(MPI_Comm comm)
      there's always at least 2 processes in an intercommunicator. */
 
   else {
+      ompi_lithe_world_coll_lock(comm);
       err = comm->c_coll->coll_barrier(comm, comm->c_coll->coll_barrier_module);
+      ompi_lithe_world_coll_unlock(comm);
   }
 
   /* All done */

@@ -71,6 +71,7 @@
 #include "ompi/constants.h"
 #include "ompi/mpi/fortran/base/constants.h"
 #include "ompi/runtime/mpiruntime.h"
+#include "ompi/runtime/ompi_lithe_world_coll.h"
 #include "ompi/runtime/params.h"
 #include "ompi/communicator/communicator.h"
 #include "ompi/info/info.h"
@@ -589,6 +590,8 @@ int ompi_mpi_init(int argc, char **argv, int requested, int *provided,
     }
 
     /* All done.  Wasn't that simple? */
+    ompi_lithe_world_coll_mpi_init_hook();
+
     opal_atomic_wmb();
     opal_atomic_swap_32(&ompi_mpi_state, OMPI_MPI_STATE_INIT_COMPLETED);
 

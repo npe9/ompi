@@ -33,6 +33,7 @@
 #include "ompi/op/op.h"
 #include "ompi/memchecker.h"
 #include "ompi/runtime/ompi_spc.h"
+#include "ompi/runtime/ompi_lithe_world_coll.h"
 
 #if OMPI_BUILD_MPI_PROFILING
 #if OPAL_HAVE_WEAK_SYMBOLS
@@ -147,9 +148,11 @@ int MPI_Reduce(const void *sendbuf, void *recvbuf, int count,
     /* Invoke the coll component to perform the back-end operation */
 
     OBJ_RETAIN(op);
+    ompi_lithe_world_coll_lock(comm);
     err = comm->c_coll->coll_reduce(sendbuf, recvbuf, count,
                                    datatype, op, root, comm,
                                    comm->c_coll->coll_reduce_module);
+    ompi_lithe_world_coll_unlock(comm);
     OBJ_RELEASE(op);
     OMPI_ERRHANDLER_RETURN(err, comm, err, FUNC_NAME);
 }

@@ -28,10 +28,12 @@ headers += \
         runtime/params.h \
 	runtime/ompi_info_support.h \
 	runtime/ompi_spc.h \
-	runtime/ompi_rte.h
+	runtime/ompi_rte.h \
+	runtime/ompi_lithe_world_coll.h
 
 lib@OMPI_LIBMPI_NAME@_la_SOURCES += \
         runtime/ompi_mpi_init.c \
+        runtime/ompi_lithe_world_coll.c \
         runtime/ompi_mpi_abort.c \
         runtime/ompi_mpi_dynamics.c \
         runtime/ompi_mpi_finalize.c \

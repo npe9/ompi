@@ -70,6 +70,7 @@
 #include "ompi/file/file.h"
 #include "ompi/info/info.h"
 #include "ompi/runtime/mpiruntime.h"
+#include "ompi/runtime/ompi_lithe_world_coll.h"
 #include "ompi/attribute/attribute.h"
 #include "ompi/mca/pml/pml.h"
 #include "ompi/mca/bml/bml.h"
@@ -292,6 +293,8 @@ int ompi_mpi_finalize(void)
     }
 
     ompi_mpi_instance_finalize (&ompi_mpi_instance_default);
+
+    ompi_lithe_world_coll_mpi_finalize_hook();
 
     /* cleanup environment */
     opal_unsetenv("OMPI_COMMAND", &environ);
