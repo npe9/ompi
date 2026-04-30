@@ -167,7 +167,7 @@ mca_pml_cm_recv(void *addr,
 
 #if OPAL_ENABLE_HETEROGENEOUS_SUPPORT
     if( MPI_ANY_SOURCE == src ) {
-        ompi_proc = ompi_proc_local_proc;
+        ompi_proc = ompi_comm_peer_lookup(comm, ompi_comm_rank(comm));
     } else {
         ompi_proc = ompi_comm_peer_lookup( comm, src );
     }

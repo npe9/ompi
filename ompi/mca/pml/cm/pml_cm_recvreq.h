@@ -27,6 +27,7 @@
 #include "pml_cm_request.h"
 #include "ompi/mca/pml/base/pml_base_recvreq.h"
 #include "ompi/mca/mtl/mtl.h"
+#include "ompi/communicator/communicator.h"
 
 struct mca_pml_cm_thin_recv_request_t {
     mca_pml_cm_request_t req_base;
@@ -106,7 +107,7 @@ do {                                                                    \
     OMPI_DATATYPE_RETAIN(datatype);                                     \
                                                                         \
     if( MPI_ANY_SOURCE == src ) {                                       \
-        ompi_proc = ompi_proc_local_proc;                               \
+        ompi_proc = ompi_comm_peer_lookup(comm, ompi_comm_rank(comm));  \
     } else {                                                            \
         ompi_proc = ompi_comm_peer_lookup( comm, src );                 \
     }                                                                   \
@@ -175,7 +176,7 @@ do {                                                                    \
     OMPI_DATATYPE_RETAIN(datatype);                                     \
                                                                         \
     if( MPI_ANY_SOURCE == src ) {                                       \
-        ompi_proc = ompi_proc_local_proc;                               \
+        ompi_proc = ompi_comm_peer_lookup(comm, ompi_comm_rank(comm));  \
     } else {                                                            \
         ompi_proc = ompi_comm_peer_lookup( comm, src );                 \
     }                                                                   \
