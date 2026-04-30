@@ -37,7 +37,11 @@ static void* pml_ucx_generic_datatype_start_pack(void *context, const void *buff
 
     OMPI_DATATYPE_RETAIN(datatype);
     convertor->datatype = datatype;
+#if OPAL_ENABLE_HETEROGENEOUS_SUPPORT
     opal_convertor_copy_and_prepare_for_send(ompi_proc_local_proc->super.proc_convertor,
+#else
+    opal_convertor_copy_and_prepare_for_send(ompi_mpi_local_convertor,
+#endif
                                              &datatype->super, count, buffer, 0,
                                              &convertor->opal_conv);
     return convertor;
@@ -54,7 +58,11 @@ static void* pml_ucx_generic_datatype_start_unpack(void *context, void *buffer,
     OMPI_DATATYPE_RETAIN(datatype);
     convertor->datatype = datatype;
     convertor->offset = 0;
+#if OPAL_ENABLE_HETEROGENEOUS_SUPPORT
     opal_convertor_copy_and_prepare_for_recv(ompi_proc_local_proc->super.proc_convertor,
+#else
+    opal_convertor_copy_and_prepare_for_recv(ompi_mpi_local_convertor,
+#endif
                                              &datatype->super, count, buffer, 0,
                                              &convertor->opal_conv);
     return convertor;
@@ -104,7 +112,11 @@ static ucs_status_t pml_ucx_generic_datatype_unpack(void *state, size_t offset,
      * unpack data. */
     if (offset != convertor->offset) {
         OBJ_CONSTRUCT(&conv, opal_convertor_t);
+#if OPAL_ENABLE_HETEROGENEOUS_SUPPORT
         opal_convertor_copy_and_prepare_for_recv(ompi_proc_local_proc->super.proc_convertor,
+#else
+        opal_convertor_copy_and_prepare_for_recv(ompi_mpi_local_convertor,
+#endif
                                                  &convertor->datatype->super,
                                                  convertor->opal_conv.count,
                                                  convertor->opal_conv.pBaseBuf, 0,
