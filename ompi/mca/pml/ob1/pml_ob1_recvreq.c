@@ -1329,7 +1329,8 @@ void mca_pml_ob1_recv_req_start(mca_pml_ob1_recv_request_t *req)
          * information of rank 0.
          */
         if( NULL == frag ) {
-            req->req_recv.req_base.req_proc = ompi_proc_local_proc;
+            req->req_recv.req_base.req_proc =
+                ompi_comm_peer_lookup(comm, ompi_comm_rank(comm));
             prepare_recv_req_converter(req);
         }
 #endif  /* !OPAL_ENABLE_HETEROGENEOUS_SUPPORT */
