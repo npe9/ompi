@@ -91,6 +91,17 @@ int ompi_mtl_ofi_progress_block_no_inline(void);
 void ompi_mtl_ofi_thread_ctxt_set(int ctxt_id);
 int ompi_mtl_ofi_thread_ctxt_get(void);
 
+#if HAVE_LITHE
+/**
+ * Nested opal_progress from OFI CQ callbacks must not iterate every ctxt lock
+ * (outer progress order vs another uthread). We count Lithe-context nesting via
+ * parlib dtls and only drain all SEP CQs on the outermost ompi_mtl_ofi_progress
+ * entry from each logical MPI rank context.
+ */
+int ompi_mtl_ofi_litheme_mc_outer_progress_enter(void);
+void ompi_mtl_ofi_litheme_mc_outer_progress_leave(void);
+#endif
+
 #define MCA_MTL_OFI_CID_NOT_EXCHANGED 2
 #define MCA_MTL_OFI_CID_EXCHANGING    1 
 #define MCA_MTL_OFI_CID_EXCHANGED     0
@@ -493,9 +504,21 @@ ompi_mtl_ofi_progress(void)
 
     if (ompi_mtl_ofi_lithe_multicontext_active()) {
 #if HAVE_LITHE
-        mtl_ofi_cq_context_enter_multicontext(ctxt_id);
-        count += ompi_mtl_ofi_context_progress(ctxt_id);
-        mtl_ofi_cq_context_exit_multicontext(ctxt_id);
+        int outer = ompi_mtl_ofi_litheme_mc_outer_progress_enter();
+        if (outer) {
+            int j;
+            for (j = 0; j < ompi_mtl_ofi.total_ctxts_used; j++) {
+                mtl_ofi_cq_context_enter_multicontext(j);
+                count += ompi_mtl_ofi_context_progress(j);
+                mtl_ofi_cq_context_exit_multicontext(j);
+            }
+        } else {
+            mtl_ofi_cq_context_enter_multicontext(ctxt_id);
+            count += ompi_mtl_ofi_context_progress(ctxt_id);
+            mtl_ofi_cq_context_exit_multicontext(ctxt_id);
+        }
+        ompi_mtl_ofi_litheme_mc_outer_progress_leave();
+        return count;
 #endif
     } else if (ompi_mtl_ofi.mpi_thread_multiple) {
         if (MTL_OFI_CONTEXT_LOCK(ctxt_id)) {
@@ -511,9 +534,9 @@ ompi_mtl_ofi_progress(void)
      * Try to progress other CQs in round-robin fashion.
      * Progress is only made if no events were read from the CQ
      * local to the calling thread past 16 times.
-     * Lithe multicontext: never acquire a second context lock while the recursive
-     * lock for the thread-local ctxt may still be held (FI callback -> RETRY ->
-     * ompi_mtl_ofi_progress); that inverts lock order vs another uthread and deadlocks.
+     * Lithe multicontext: outer ompi_mtl_ofi_progress drains every ctxt CQ sequentially
+     * but nested entries (CQ callbacks calling opal_progress) drain only thread-local ctxt
+     * via ompi_mtl_ofi_litheme_mc_outer_progress_enter().
      */
     if (OPAL_UNLIKELY((count == 0) && !ompi_mtl_ofi_lithe_multicontext_active() &&
         ompi_mtl_ofi.mpi_thread_multiple && (((num_calls++) & 0xF) == 0 ))) {
@@ -545,9 +568,25 @@ ompi_mtl_ofi_progress_block(void)
 
     if (ompi_mtl_ofi_lithe_multicontext_active()) {
 #if HAVE_LITHE
+        int outer = ompi_mtl_ofi_litheme_mc_outer_progress_enter();
+
+        if (outer) {
+            int j;
+            for (j = 0; j < ompi_mtl_ofi.total_ctxts_used; j++) {
+                mtl_ofi_cq_context_enter_multicontext(j);
+                count += ompi_mtl_ofi_context_progress(j);
+                mtl_ofi_cq_context_exit_multicontext(j);
+            }
+            if (count > 0) {
+                ompi_mtl_ofi_litheme_mc_outer_progress_leave();
+                return count;
+            }
+        }
         mtl_ofi_cq_context_enter_multicontext(ctxt_id);
         count += ompi_mtl_ofi_context_progress_block(ctxt_id);
         mtl_ofi_cq_context_exit_multicontext(ctxt_id);
+        ompi_mtl_ofi_litheme_mc_outer_progress_leave();
+        return count;
 #endif
     } else {
         count += ompi_mtl_ofi_context_progress_block(ctxt_id);

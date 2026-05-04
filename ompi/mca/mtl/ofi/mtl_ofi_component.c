@@ -104,6 +104,76 @@ int ompi_mtl_ofi_thread_ctxt_get(void)
 #endif
 }
 
+#if HAVE_LITHE && OMPI_MTL_OFI_HAVE_PARLIB_DTLS
+
+static dtls_key_t ompi_mtl_ofi_mc_prog_nest_key;
+static volatile int ompi_mtl_ofi_mc_prog_nest_ready;
+
+/* Track outermost Lithe-context opal_progress so we sweep every SEP CQ once,
+ * while nested CQ callback progress only drains the invoking ctxt's CQ. */
+
+static void ompi_mtl_ofi_mc_prog_nest_lazy_init(void)
+{
+    if (0 != ompi_mtl_ofi_mc_prog_nest_ready) {
+        return;
+    }
+    if (NULL == getenv("OMPI_LITHE_CONTEXT_LOCAL_PROC")) {
+        ompi_mtl_ofi_mc_prog_nest_ready = -1;
+        return;
+    }
+    ompi_mtl_ofi_mc_prog_nest_key = dtls_key_create(NULL);
+    ompi_mtl_ofi_mc_prog_nest_ready = (NULL == ompi_mtl_ofi_mc_prog_nest_key) ? -1 : 1;
+}
+
+int ompi_mtl_ofi_litheme_mc_outer_progress_enter(void)
+{
+    intptr_t depth;
+
+    if (!ompi_mtl_ofi_lithe_multicontext_active()) {
+        return 1;
+    }
+    ompi_mtl_ofi_mc_prog_nest_lazy_init();
+    if (ompi_mtl_ofi_mc_prog_nest_ready <= 0) {
+        return 1;
+    }
+
+    depth = (intptr_t) get_dtls(ompi_mtl_ofi_mc_prog_nest_key);
+    depth++;
+    set_dtls(ompi_mtl_ofi_mc_prog_nest_key, (void *) depth);
+    return (depth == 1);
+}
+
+void ompi_mtl_ofi_litheme_mc_outer_progress_leave(void)
+{
+    intptr_t depth;
+
+    if (!ompi_mtl_ofi_lithe_multicontext_active()) {
+        return;
+    }
+    if (ompi_mtl_ofi_mc_prog_nest_ready <= 0) {
+        return;
+    }
+
+    depth = (intptr_t) get_dtls(ompi_mtl_ofi_mc_prog_nest_key);
+    if (depth <= 1) {
+        set_dtls(ompi_mtl_ofi_mc_prog_nest_key, NULL);
+    } else {
+        set_dtls(ompi_mtl_ofi_mc_prog_nest_key, (void *) (depth - 1));
+    }
+}
+#elif HAVE_LITHE
+
+int ompi_mtl_ofi_litheme_mc_outer_progress_enter(void)
+{
+    return 1;
+}
+
+void ompi_mtl_ofi_litheme_mc_outer_progress_leave(void)
+{
+}
+
+#endif /* HAVE_LITHE with/without PARLIB DTLS progress nesting */
+
 #if HAVE_LITHE
 static opal_proc_local_changed_fn_t ompi_mtl_ofi_prev_proc_local_hook;
 static int ompi_mtl_ofi_proc_hook_installed;
