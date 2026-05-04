@@ -20,6 +20,17 @@
 #include "opal/util/argv.h"
 #include "opal/util/printf.h"
 #include "opal/mca/common/ofi/common_ofi.h"
+#include "opal/util/proc.h"
+
+#include <stdint.h>
+#include <stdlib.h>
+
+#if defined(__has_include)
+#    if __has_include(<parlib/dtls.h>)
+#        include <parlib/dtls.h>
+#        define OMPI_MTL_OFI_HAVE_PARLIB_DTLS 1
+#    endif
+#endif
 
 static int ompi_mtl_ofi_component_open(void);
 static int ompi_mtl_ofi_component_query(mca_base_module_t **module, int *priority);
@@ -38,8 +49,84 @@ static int av_type;
 static int ofi_tag_mode;
 
 #if OPAL_HAVE_THREAD_LOCAL
-    opal_thread_local int ompi_mtl_ofi_per_thread_ctx;
+static opal_thread_local int ompi_mtl_ofi_per_thread_ctx_fallback;
 #endif
+
+#if OMPI_MTL_OFI_HAVE_PARLIB_DTLS
+static dtls_key_t ompi_mtl_ofi_ctxt_dtls_key;
+static volatile int ompi_mtl_ofi_ctxt_dtls_ready;
+#endif
+
+static void ompi_mtl_ofi_ctxt_storage_lazy_init(void)
+{
+#if OMPI_MTL_OFI_HAVE_PARLIB_DTLS
+    if (ompi_mtl_ofi_ctxt_dtls_ready != 0) {
+        return;
+    }
+    if (NULL == getenv("OMPI_LITHE_CONTEXT_LOCAL_PROC")) {
+        ompi_mtl_ofi_ctxt_dtls_ready = -1;
+        return;
+    }
+    ompi_mtl_ofi_ctxt_dtls_key = dtls_key_create(NULL);
+    ompi_mtl_ofi_ctxt_dtls_ready = (NULL == ompi_mtl_ofi_ctxt_dtls_key) ? -1 : 1;
+#else
+    (void) 0;
+#endif
+}
+
+void ompi_mtl_ofi_thread_ctxt_set(int ctxt_id)
+{
+    ompi_mtl_ofi_ctxt_storage_lazy_init();
+#if OMPI_MTL_OFI_HAVE_PARLIB_DTLS
+    if (ompi_mtl_ofi_ctxt_dtls_ready > 0) {
+        set_dtls(ompi_mtl_ofi_ctxt_dtls_key, (void *) (intptr_t) ctxt_id);
+        return;
+    }
+#endif
+#if OPAL_HAVE_THREAD_LOCAL
+    ompi_mtl_ofi_per_thread_ctx_fallback = ctxt_id;
+#endif
+}
+
+int ompi_mtl_ofi_thread_ctxt_get(void)
+{
+    ompi_mtl_ofi_ctxt_storage_lazy_init();
+#if OMPI_MTL_OFI_HAVE_PARLIB_DTLS
+    if (ompi_mtl_ofi_ctxt_dtls_ready > 0) {
+        void *v = get_dtls(ompi_mtl_ofi_ctxt_dtls_key);
+        return (int) (intptr_t) v;
+    }
+#endif
+#if OPAL_HAVE_THREAD_LOCAL
+    return ompi_mtl_ofi_per_thread_ctx_fallback;
+#else
+    return 0;
+#endif
+}
+
+#if HAVE_LITHE
+static opal_proc_local_changed_fn_t ompi_mtl_ofi_prev_proc_local_hook;
+static int ompi_mtl_ofi_proc_hook_installed;
+
+static void ompi_mtl_ofi_proc_local_changed_cb(void)
+{
+    if (NULL != ompi_mtl_ofi_prev_proc_local_hook) {
+        ompi_mtl_ofi_prev_proc_local_hook();
+    }
+    if (!ompi_mtl_ofi_lithe_multicontext_active()) {
+        return;
+    }
+    if (ompi_comm_invalid(&ompi_mpi_comm_world.comm)) {
+        ompi_mtl_ofi_thread_ctxt_set(0);
+        return;
+    }
+    {
+        int ctxt = ompi_mtl_ofi_ctxt_index_for_comm(&ompi_mpi_comm_world.comm);
+
+        ompi_mtl_ofi_thread_ctxt_set(ctxt);
+    }
+}
+#endif /* HAVE_LITHE */
 
 /*
  * Enumerators
@@ -289,7 +376,13 @@ ompi_mtl_ofi_component_open(void)
             "provider_exclude")) {
         return OMPI_ERR_NOT_AVAILABLE;
     }
-    return opal_common_ofi_open();
+    {
+        int ret = opal_common_ofi_open();
+        if (OMPI_SUCCESS != ret) {
+            return ret;
+        }
+    }
+    return OMPI_SUCCESS;
 }
 
 static int
@@ -303,6 +396,15 @@ ompi_mtl_ofi_component_query(mca_base_module_t **module, int *priority)
 static int
 ompi_mtl_ofi_component_close(void)
 {
+#if HAVE_LITHE
+    if (ompi_mtl_ofi_proc_hook_installed) {
+        if (opal_proc_local_changed_hook == ompi_mtl_ofi_proc_local_changed_cb) {
+            opal_proc_local_changed_hook = ompi_mtl_ofi_prev_proc_local_hook;
+        }
+        ompi_mtl_ofi_prev_proc_local_hook = NULL;
+        ompi_mtl_ofi_proc_hook_installed = 0;
+    }
+#endif
     return opal_common_ofi_close();
 }
 
@@ -1142,6 +1244,12 @@ select_prov:
     ompi_mtl_ofi.has_posted_initial_buffer = false;
     
     ompi_mtl_ofi.base.mtl_flags |= MCA_MTL_BASE_FLAG_SUPPORTS_EXT_CID;
+
+#if HAVE_LITHE
+    ompi_mtl_ofi_prev_proc_local_hook = opal_proc_local_changed_hook;
+    opal_proc_local_changed_hook = ompi_mtl_ofi_proc_local_changed_cb;
+    ompi_mtl_ofi_proc_hook_installed = 1;
+#endif
 
     return &ompi_mtl_ofi.base;
 
