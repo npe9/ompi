@@ -24,6 +24,7 @@
 #include "opal_config.h"
 #include "opal/class/opal_object.h"
 #include "opal/constants.h"
+#include "opal/prefetch.h"
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -79,6 +80,13 @@ extern __thread struct uthread *current_uthread;
         abort(); \
     } \
 } while (0)
+
+#define LITHE_MUTEX_ENSURE_VCORE()                       \
+    do {                                                 \
+        if (OPAL_UNLIKELY(current_uthread == NULL)) {    \
+            lithe_ensure_main_on_vcore0();               \
+        }                                                \
+    } while (0)
 
 /* Hybrid mutex: lithe only on lock paths (pthread fields kept for struct layout / init) */
 typedef struct {
@@ -143,6 +151,7 @@ OPAL_DECLSPEC void ensure_main_fj_context(void);
 
 static inline int opal_thread_internal_mutex_lock(opal_thread_internal_mutex_t *p_mutex)
 {
+    LITHE_MUTEX_ENSURE_VCORE();
     LITHE_ASSERT_VCORE();
     ensure_main_fj_context();
     return 0 == lithe_mutex_lock(&p_mutex->lithe_lock) ? OPAL_SUCCESS : OPAL_ERR_IN_ERRNO;
@@ -150,12 +159,14 @@ static inline int opal_thread_internal_mutex_lock(opal_thread_internal_mutex_t *
 
 static inline int opal_thread_internal_mutex_trylock(opal_thread_internal_mutex_t *p_mutex)
 {
+    LITHE_MUTEX_ENSURE_VCORE();
     LITHE_ASSERT_VCORE();
     return 0 == lithe_mutex_trylock(&p_mutex->lithe_lock) ? OPAL_SUCCESS : OPAL_ERR_IN_ERRNO;
 }
 
 static inline int opal_thread_internal_mutex_unlock(opal_thread_internal_mutex_t *p_mutex)
 {
+    LITHE_MUTEX_ENSURE_VCORE();
     LITHE_ASSERT_VCORE();
     return 0 == lithe_mutex_unlock(&p_mutex->lithe_lock) ? OPAL_SUCCESS : OPAL_ERR_IN_ERRNO;
 }
@@ -175,13 +186,17 @@ static inline int opal_thread_internal_cond_destroy(opal_thread_internal_cond_t 
 
 static inline int opal_thread_internal_cond_wait(opal_thread_internal_cond_t *p_cond, opal_thread_internal_mutex_t *p_mutex)
 {
+    LITHE_MUTEX_ENSURE_VCORE();
     LITHE_ASSERT_VCORE();
     ensure_main_fj_context();
-    return 0 == lithe_condvar_wait(&p_cond->lithe_cond, &p_mutex->lithe_lock) ? OPAL_SUCCESS : OPAL_ERR_IN_ERRNO;
+    return 0 == lithe_condvar_wait(&p_cond->lithe_cond, &p_mutex->lithe_lock)
+               ? OPAL_SUCCESS
+               : OPAL_ERR_IN_ERRNO;
 }
 
 static inline int opal_thread_internal_cond_signal(opal_thread_internal_cond_t *p_cond)
 {
+    LITHE_MUTEX_ENSURE_VCORE();
     LITHE_ASSERT_VCORE();
     lithe_condvar_signal(&p_cond->lithe_cond);
     return OPAL_SUCCESS;
@@ -189,6 +204,7 @@ static inline int opal_thread_internal_cond_signal(opal_thread_internal_cond_t *
 
 static inline int opal_thread_internal_cond_broadcast(opal_thread_internal_cond_t *p_cond)
 {
+    LITHE_MUTEX_ENSURE_VCORE();
     LITHE_ASSERT_VCORE();
     lithe_condvar_broadcast(&p_cond->lithe_cond);
     return OPAL_SUCCESS;

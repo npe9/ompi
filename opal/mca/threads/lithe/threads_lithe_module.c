@@ -32,6 +32,10 @@ bool opal_sched_entered = false;
 
 volatile int opal_lithe_vcore_ready = 0;
 
+/* pmix_thread_start may not see pmix_lithe_get_fork_join_sched() after OPAL's
+ * register in rare link/order cases; OPAL publishes the same pointer here. */
+lithe_fork_join_sched_t *opal_lithe_pmix_export_sched = NULL;
+
 /*
  * Strong vcore_entry overrides libvcore_confstub's no-op.
  * Called by parlib when a vcore wakes from futex_wait.
@@ -81,9 +85,11 @@ void opal_threads_lithe_ensure_opal_fork_join_sched(void)
     if (opal_sched == NULL) {
         opal_sched = lithe_fork_join_sched_create();
         if (opal_sched == NULL) {
+            fprintf(stderr, "[OPAL-Lithe] lithe_fork_join_sched_create returned NULL\n");
             return;
         }
     }
+    opal_lithe_pmix_export_sched = opal_sched;
     pmix_lithe_register_fork_join_sched(opal_sched);
     if (!opal_sched_entered) {
         lithe_sched_t *cur = lithe_sched_current();
@@ -92,6 +98,13 @@ void opal_threads_lithe_ensure_opal_fork_join_sched(void)
             opal_sched_entered = true;
         }
     }
+}
+
+/* OpenPMIx weak hook: pmix_thread_start may run before any OPAL mutex. */
+void opal_pmix_lithe_host_ensure_sched(void)
+{
+    lithe_ensure_main_on_vcore0();
+    opal_threads_lithe_ensure_opal_fork_join_sched();
 }
 
 opal_threads_base_module_t opal_threads_lithe_module = {

@@ -60,6 +60,10 @@ int opal_threads_lithe_open(void)
     if (NULL == getenv("OPAL_SHOW_HELP_FORCE_PMIX_LOG")) {
         opal_show_help_set_use_pmix_log(0);
     }
+    /* Deferred lithe constructor: uthread_lib_init was skipped at .so load.
+     * threads_init() and OPAL mutex paths require a parlib uthread; migrate main
+     * when OPAL adopts Lithe (including opal_wrapper / mpicxx). */
+    lithe_ensure_main_on_vcore0();
     opal_threads_lithe_ensure_init();
     if (lithe_component_debug())
         fprintf(stderr, "[LITHE-COMPONENT] ensure_init() completed\n");

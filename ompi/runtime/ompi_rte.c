@@ -64,6 +64,11 @@
 opal_process_name_t pmix_name_wildcard = {UINT32_MAX-1, UINT32_MAX-1};
 opal_process_name_t pmix_name_invalid = {UINT32_MAX, UINT32_MAX};
 
+/* Hosted Lithe multicontext (LITHE_CONTEXT_RANKS_PER_HOST>1): logical rank identity lives in
+ * OPAL parlib DTLS; ompi_proc_local() must map that name to the full ompi_proc_t from the
+ * world peer table — not the single global ompi_proc_local_proc from bootstrap. */
+int ompi_rte_lithe_hosted_multicontext_active = 0;
+
 /**
  * Flag used to indicate whether we setup (and should destroy) our job session
  * directory. We keep track of this information because we may be using run-time
@@ -726,6 +731,7 @@ int ompi_rte_init(int *pargc, char ***pargv)
         opal_process_info.my_local_rank *= lithe_ranks_per_host;
         opal_process_info.my_node_rank *= lithe_ranks_per_host;
         setenv("OMPI_LITHE_CONTEXT_LOCAL_PROC", "1", 0);
+        ompi_rte_lithe_hosted_multicontext_active = 1;
     }
 
     /* get universe size */

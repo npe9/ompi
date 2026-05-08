@@ -101,6 +101,9 @@ OBJ_CLASS_DECLARATION(ompi_proc_t);
 OMPI_DECLSPEC extern ompi_proc_t* ompi_proc_local_proc;
 OMPI_DECLSPEC extern opal_list_t  ompi_proc_list;
 
+/** Set by ompi_rte when LITHE_CONTEXT_RANKS_PER_HOST>1 (hosted logical ranks). */
+OMPI_DECLSPEC extern int ompi_rte_lithe_hosted_multicontext_active;
+
 /* ******************************************************************** */
 
 
@@ -253,6 +256,23 @@ OMPI_DECLSPEC ompi_proc_t** ompi_proc_self(size_t* size);
 
 
 /**
+ * Returns the proc instance for a given name
+ *
+ * Returns the proc instance for the specified process name.  The
+ * reference count for the proc instance is not incremented by this
+ * function.
+ *
+ * @param[in] name     The process name to look for
+ *
+ * @return Pointer to the process instance for \p name
+ */
+OMPI_DECLSPEC ompi_proc_t *ompi_proc_find(const ompi_process_name_t *name);
+
+OMPI_DECLSPEC ompi_proc_t *ompi_proc_find_and_add(const ompi_process_name_t *name, bool *isnew);
+
+OMPI_DECLSPEC opal_proc_t *ompi_proc_lookup(const opal_process_name_t proc_name);
+
+/**
  * Returns a pointer to the local process
  *
  * Returns a pointer to the local process.  Unlike ompi_proc_self(),
@@ -263,24 +283,18 @@ OMPI_DECLSPEC ompi_proc_t** ompi_proc_self(size_t* size);
  */
 static inline ompi_proc_t* ompi_proc_local(void)
 {
+    if (OPAL_UNLIKELY(ompi_rte_lithe_hosted_multicontext_active)) {
+        opal_proc_t *opal_self = opal_proc_local_get();
+        if (NULL != opal_self) {
+            opal_proc_t *named = ompi_proc_lookup(opal_self->proc_name);
+            if (NULL != named) {
+                return (ompi_proc_t *) named;
+            }
+        }
+    }
     return ompi_proc_local_proc;
 }
 
-
-/**
- * Returns the proc instance for a given name
- *
- * Returns the proc instance for the specified process name.  The
- * reference count for the proc instance is not incremented by this
- * function.
- *
- * @param[in] name     The process name to look for
- *
- * @return Pointer to the process instance for \c name
-*/
-OMPI_DECLSPEC ompi_proc_t * ompi_proc_find ( const ompi_process_name_t* name );
-
-OMPI_DECLSPEC ompi_proc_t * ompi_proc_find_and_add(const ompi_process_name_t * name, bool* isnew);
 
 /**
  * Pack proc list into portable buffer
@@ -380,8 +394,7 @@ OMPI_DECLSPEC int ompi_proc_refresh(void);
  * added to any communicator. ompi_comm_peer_lookup is responsible for caching
  * the ompi_proc_t on a communicator.
  */
-OMPI_DECLSPEC opal_proc_t *ompi_proc_for_name (const opal_process_name_t proc_name);
-
+OMPI_DECLSPEC opal_proc_t *ompi_proc_for_name(const opal_process_name_t proc_name);
 
 OMPI_DECLSPEC opal_proc_t *ompi_proc_lookup (const opal_process_name_t proc_name);
 
