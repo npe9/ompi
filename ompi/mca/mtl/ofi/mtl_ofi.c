@@ -46,15 +46,8 @@ mca_mtl_ofi_module_t ompi_mtl_ofi = {
 
 static uint32_t ompi_mtl_ofi_lithe_ranks_per_host(void)
 {
-    char *env = getenv("LITHE_CONTEXT_RANKS_PER_HOST");
-    char *end = NULL;
-    unsigned long value;
-
-    if (NULL == env || '\0' == *env) {
-        return 0;
-    }
-    value = strtoul(env, &end, 10);
-    if (end == env || value < 2 || value > UINT32_MAX) {
+    unsigned long value = opal_lithe_env_cache_rph();
+    if (value < 2UL || value > UINT32_MAX) {
         return 0;
     }
     return (uint32_t) value;

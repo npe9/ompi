@@ -497,7 +497,10 @@ static inline int ompi_comm_invalid (const ompi_communicator_t* comm)
  */
 static inline int ompi_comm_rank (const ompi_communicator_t* comm)
 {
-    if (comm == &ompi_mpi_comm_world.comm && NULL != getenv("OMPI_LITHE_CONTEXT_LOCAL_PROC")) {
+    /* Lithe multicontext: logical rank == TLS-local opal vpid (not c_my_rank,
+     * which is shared across all uthreads in this OS process). Cached lithe
+     * env active-flag avoids per-call getenv() in the collective hot path. */
+    if (comm == &ompi_mpi_comm_world.comm && opal_lithe_env_cache_active()) {
         return (int) opal_proc_local_get()->proc_name.vpid;
     }
     return comm->c_my_rank;

@@ -238,8 +238,10 @@ static inline int ompi_group_size(ompi_group_t *group)
  */
 static inline int ompi_group_rank(ompi_group_t *group)
 {
+    /* Lithe multicontext: see ompi_comm_rank in communicator.h. Cached env
+     * check (single int load) replaces per-call getenv() in coll hot paths. */
     if (NULL != ompi_mpi_intrinsic_world_group && group == ompi_mpi_intrinsic_world_group &&
-        NULL != getenv("OMPI_LITHE_CONTEXT_LOCAL_PROC")) {
+        opal_lithe_env_cache_active()) {
         return (int)opal_proc_local_get()->proc_name.vpid;
     }
     return group->grp_my_rank;

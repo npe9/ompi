@@ -77,6 +77,38 @@ static opal_proc_t *opal_proc_my_name = &opal_local_proc;
 
 opal_proc_local_changed_fn_t opal_proc_local_changed_hook = NULL;
 
+/*
+ * Lithe multicontext env cache (see opal/util/proc.h).
+ * Initialized to a sentinel so the first reader populates it from getenv()
+ * and every subsequent reader hits a single load. Writes are not synchronized
+ * because the values are deterministic and natural-aligned scalar writes on
+ * x86_64 are atomic.
+ */
+int opal_lithe_env_active_cache = -1;
+unsigned long opal_lithe_env_rph_cache = 0UL;
+
+void opal_lithe_env_cache_fill(void)
+{
+    const char *local = getenv("OMPI_LITHE_CONTEXT_LOCAL_PROC");
+    const char *env = getenv("LITHE_CONTEXT_RANKS_PER_HOST");
+    char *end = NULL;
+    unsigned long v;
+
+    if (NULL == local || '\0' == *local || NULL == env || '\0' == *env) {
+        opal_lithe_env_rph_cache = 0UL;
+        opal_lithe_env_active_cache = 0;
+        return;
+    }
+    v = strtoul(env, &end, 10);
+    if (end == env || v < 2UL) {
+        opal_lithe_env_rph_cache = 0UL;
+        opal_lithe_env_active_cache = 0;
+        return;
+    }
+    opal_lithe_env_rph_cache = v;
+    opal_lithe_env_active_cache = 1;
+}
+
 #if OPAL_HAVE_PARLIB_DTLS
 static dtls_key_t opal_proc_local_dtls_key;
 static volatile int opal_proc_local_dtls_ready;
@@ -94,7 +126,7 @@ static void opal_proc_local_dtls_init(void)
     if (opal_proc_local_dtls_ready) {
         return;
     }
-    if (NULL == getenv("OMPI_LITHE_CONTEXT_LOCAL_PROC")) {
+    if (!opal_lithe_env_cache_active()) {
         opal_proc_local_dtls_ready = -1;
         return;
     }

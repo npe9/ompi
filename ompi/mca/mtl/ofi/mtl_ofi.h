@@ -234,22 +234,9 @@ opal_mutex_atomic_unlock(&ompi_mtl_ofi.ofi_ctxt[ctxt_id].context_lock)
 __opal_attribute_always_inline__ static inline int
 ompi_mtl_ofi_lithe_multicontext_active(void)
 {
-    char *env = getenv("LITHE_CONTEXT_RANKS_PER_HOST");
-    char *end = NULL;
-    unsigned long v;
-    const char *local = getenv("OMPI_LITHE_CONTEXT_LOCAL_PROC");
-
-    if (NULL == local || '\0' == *local) {
-        return 0;
-    }
-    if (NULL == env || '\0' == *env) {
-        return 0;
-    }
-    v = strtoul(env, &end, 10);
-    if (end == env || v < 2UL) {
-        return 0;
-    }
-    return 1;
+    /* Cached once at first read in opal/util/proc.{h,c}. Was getenv() per call
+     * before, which dominated lithified profiles (~57% of CPU at 384 ranks). */
+    return opal_lithe_env_cache_active();
 }
 
 __opal_attribute_always_inline__ static inline void
@@ -273,19 +260,13 @@ mtl_ofi_cq_context_exit_multicontext(int ctxt_id)
 __opal_attribute_always_inline__ static inline int
 ompi_mtl_ofi_lithe_multicontext_ctxt_index(void)
 {
-    char *env;
-    char *end;
     unsigned long rph;
 
     if (!ompi_mtl_ofi_lithe_multicontext_active() || ompi_mtl_ofi.total_ctxts_used <= 0) {
         return -1;
     }
-    env = getenv("LITHE_CONTEXT_RANKS_PER_HOST");
-    if (NULL == env || '\0' == *env) {
-        return -1;
-    }
-    rph = strtoul(env, &end, 10);
-    if (end == env || rph < 2UL) {
+    rph = opal_lithe_env_cache_rph();
+    if (rph < 2UL) {
         return -1;
     }
     {
@@ -333,8 +314,6 @@ static inline int ompi_mtl_ofi_ctxt_index_for_comm(struct ompi_communicator_t *c
 __opal_attribute_always_inline__ static inline int
 ompi_mtl_ofi_sep_peer_rx_ctxt(struct ompi_proc_t *peer_proc, int local_ctxt)
 {
-    char *env;
-    char *end;
     unsigned long rph;
 
     if (NULL == peer_proc) {
@@ -343,12 +322,8 @@ ompi_mtl_ofi_sep_peer_rx_ctxt(struct ompi_proc_t *peer_proc, int local_ctxt)
     if (!ompi_mtl_ofi_lithe_multicontext_active()) {
         return local_ctxt;
     }
-    env = getenv("LITHE_CONTEXT_RANKS_PER_HOST");
-    if (NULL == env || '\0' == *env) {
-        return local_ctxt;
-    }
-    rph = strtoul(env, &end, 10);
-    if (end == env || rph < 2UL) {
+    rph = opal_lithe_env_cache_rph();
+    if (rph < 2UL) {
         return local_ctxt;
     }
     {

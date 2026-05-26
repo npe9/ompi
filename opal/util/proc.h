@@ -182,4 +182,45 @@ OPAL_DECLSPEC extern struct opal_proc_t *(*opal_proc_for_name)(const opal_proces
  * owned by the proc_t */
 OPAL_DECLSPEC extern char *(*opal_get_proc_hostname)(const opal_proc_t *proc);
 
+/*
+ * Lithe multicontext env cache.
+ *
+ * LITHE_CONTEXT_RANKS_PER_HOST and OMPI_LITHE_CONTEXT_LOCAL_PROC are job-launch
+ * environment variables that never change after the process starts. Several
+ * hot inline paths (MTL OFI progress, ompi_comm_rank, ompi_group_rank, the
+ * MTL multicontext active check) used to call getenv() on every invocation,
+ * which dominates lithified profiles at scale (~57% of CPU at 384 ranks).
+ *
+ * The cache is populated lazily on first read and is then a single load. Two
+ * cells (active flag + parsed rph) are written by opal_lithe_env_cache_fill()
+ * which the inlines call when the flag is still in its sentinel state (-1).
+ * Safe to call from multiple threads/contexts: getenv() is libc-thread-safe,
+ * the parse is deterministic, and natural-alignment writes to int/unsigned
+ * long on x86_64 are atomic so a racing reader either sees the old sentinel
+ * (and re-runs init) or the final cached value.
+ */
+OPAL_DECLSPEC extern int opal_lithe_env_active_cache;       /* -1 = unfilled, 0 = inactive, 1 = active */
+OPAL_DECLSPEC extern unsigned long opal_lithe_env_rph_cache; /* 0 = inactive, >=2 = ranks per host */
+OPAL_DECLSPEC void opal_lithe_env_cache_fill(void);
+
+static inline __opal_attribute_always_inline__ int
+opal_lithe_env_cache_active(void)
+{
+    int v = opal_lithe_env_active_cache;
+    if (OPAL_UNLIKELY(v < 0)) {
+        opal_lithe_env_cache_fill();
+        v = opal_lithe_env_active_cache;
+    }
+    return v;
+}
+
+static inline __opal_attribute_always_inline__ unsigned long
+opal_lithe_env_cache_rph(void)
+{
+    if (OPAL_UNLIKELY(opal_lithe_env_active_cache < 0)) {
+        opal_lithe_env_cache_fill();
+    }
+    return opal_lithe_env_rph_cache;
+}
+
 #endif /* OPAL_PROC_H */
