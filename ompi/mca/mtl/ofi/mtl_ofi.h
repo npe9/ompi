@@ -245,6 +245,16 @@ mtl_ofi_cq_context_enter_multicontext(int ctxt_id)
     opal_mutex_lock(&ompi_mtl_ofi.ofi_ctxt[ctxt_id].context_lock);
 }
 
+/* Non-blocking variant: returns 1 if the ctxt lock was acquired, 0 otherwise.
+ * Used by the throttled peer-ctxt sweep in ompi_mtl_ofi_progress so that an
+ * outer progress call never serializes on a peer uthread currently draining
+ * its own CQ — we just skip that ctxt this round and try again later. */
+__opal_attribute_always_inline__ static inline int
+mtl_ofi_cq_context_trylock_multicontext(int ctxt_id)
+{
+    return !opal_mutex_atomic_trylock(&ompi_mtl_ofi.ofi_ctxt[ctxt_id].context_lock);
+}
+
 __opal_attribute_always_inline__ static inline void
 mtl_ofi_cq_context_exit_multicontext(int ctxt_id)
 {
@@ -479,18 +489,34 @@ ompi_mtl_ofi_progress(void)
 
     if (ompi_mtl_ofi_lithe_multicontext_active()) {
 #if HAVE_LITHE
+        /* Multicontext (Lithe-hosted MPI ranks): own ctxt holds this rank's TX
+         * completions and is the SEP-RX index peers target via
+         * ompi_mtl_ofi_sep_peer_rx_ctxt(). Drain it first; the old code swept
+         * every CQ unconditionally on each opal_progress, dominating the
+         * 96-rank/node profile (cxip_util_cq_progress + fi_cq_read excess).
+         * Outer-most empty rounds fall back to a throttled peer-ctxt sweep
+         * (every 16th call, trylock-only) to surface any straggler events
+         * without serializing on a peer uthread that is already progressing. */
         int outer = ompi_mtl_ofi_litheme_mc_outer_progress_enter();
-        if (outer) {
+
+        mtl_ofi_cq_context_enter_multicontext(ctxt_id);
+        count += ompi_mtl_ofi_context_progress(ctxt_id);
+        mtl_ofi_cq_context_exit_multicontext(ctxt_id);
+
+        if (outer && count == 0 &&
+            OPAL_UNLIKELY((((num_calls++) & 0xF) == 0))) {
             int j;
-            for (j = 0; j < ompi_mtl_ofi.total_ctxts_used; j++) {
-                mtl_ofi_cq_context_enter_multicontext(j);
-                count += ompi_mtl_ofi_context_progress(j);
-                mtl_ofi_cq_context_exit_multicontext(j);
+            int n = ompi_mtl_ofi.total_ctxts_used;
+            for (j = 1; j < n; j++) {
+                int k = (ctxt_id + j) % n;
+                if (mtl_ofi_cq_context_trylock_multicontext(k)) {
+                    count += ompi_mtl_ofi_context_progress(k);
+                    mtl_ofi_cq_context_exit_multicontext(k);
+                    if (OPAL_LIKELY(count > 0)) {
+                        break;
+                    }
+                }
             }
-        } else {
-            mtl_ofi_cq_context_enter_multicontext(ctxt_id);
-            count += ompi_mtl_ofi_context_progress(ctxt_id);
-            mtl_ofi_cq_context_exit_multicontext(ctxt_id);
         }
         ompi_mtl_ofi_litheme_mc_outer_progress_leave();
         return count;
@@ -538,19 +564,36 @@ __opal_attribute_always_inline__ static inline int
 ompi_mtl_ofi_progress_block(void)
 {
     int count = 0, ctxt_id = 0;
+    static volatile uint32_t num_calls_block = 0;
 
     get_thread_context(&ctxt_id);
 
     if (ompi_mtl_ofi_lithe_multicontext_active()) {
 #if HAVE_LITHE
+        /* Mirror ompi_mtl_ofi_progress (above): own-ctxt drain first, then a
+         * throttled trylock sweep of peer ctxts, then finally block on own
+         * ctxt's CQ fd via FI_WAIT_FD. Was an unconditional N-way sweep. */
         int outer = ompi_mtl_ofi_litheme_mc_outer_progress_enter();
 
-        if (outer) {
+        mtl_ofi_cq_context_enter_multicontext(ctxt_id);
+        count += ompi_mtl_ofi_context_progress(ctxt_id);
+        mtl_ofi_cq_context_exit_multicontext(ctxt_id);
+        if (count > 0) {
+            ompi_mtl_ofi_litheme_mc_outer_progress_leave();
+            return count;
+        }
+        if (outer && OPAL_UNLIKELY((((num_calls_block++) & 0xF) == 0))) {
             int j;
-            for (j = 0; j < ompi_mtl_ofi.total_ctxts_used; j++) {
-                mtl_ofi_cq_context_enter_multicontext(j);
-                count += ompi_mtl_ofi_context_progress(j);
-                mtl_ofi_cq_context_exit_multicontext(j);
+            int n = ompi_mtl_ofi.total_ctxts_used;
+            for (j = 1; j < n; j++) {
+                int k = (ctxt_id + j) % n;
+                if (mtl_ofi_cq_context_trylock_multicontext(k)) {
+                    count += ompi_mtl_ofi_context_progress(k);
+                    mtl_ofi_cq_context_exit_multicontext(k);
+                    if (OPAL_LIKELY(count > 0)) {
+                        break;
+                    }
+                }
             }
             if (count > 0) {
                 ompi_mtl_ofi_litheme_mc_outer_progress_leave();
