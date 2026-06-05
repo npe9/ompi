@@ -1137,7 +1137,8 @@ socket_binded:
                            mca_btl_tcp_component_event_async_handler, &mca_btl_tcp_progress_thread);
             opal_event_add(&mca_btl_tcp_component.tcp_recv_thread_async_event, 0);
 
-            /* fork off a thread to progress it */
+            /* Async progress: MCA threads lith -> opal_thread_start fork_join context (+ t_run);
+               MCA pthreads -> POSIX thread. Threaded libevent uses lith mutex/cv when HAVE_LITHE. */
             mca_btl_tcp_progress_thread.t_run = mca_btl_tcp_progress_thread_engine;
             mca_btl_tcp_progress_thread.t_arg = &mca_btl_tcp_progress_thread_trigger;
             mca_btl_tcp_progress_thread_trigger = 1; /* thread up and running */

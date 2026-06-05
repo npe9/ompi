@@ -86,8 +86,18 @@ OPAL_DECLSPEC int opal_event_finalize(void);
 
 #define opal_event_set_priority(x, n) event_priority_set((x), (n))
 
-/* thread support APIs */
-#define opal_event_use_threads() evthread_use_pthreads()
+/*
+ * Registers libevent global lock/notify callbacks before any threaded event_base
+ * exists. Lith builds (--with-lithe, HAVE_LITHE): lithe_mutex_t/lithe_condvar_t via
+ * evthread_set_*_callbacks + lithe identity for evthread_make_base_notifiable. Other
+ * builds: evthread_use_pthreads().
+ * See docs/OPAL_LIBEVENT_AND_LITHE.md in this repository.
+ */
+OPAL_DECLSPEC int opal_event_use_threads(void);
+
+#if HAVE_LITHE
+OPAL_DECLSPEC int opal_lithe_evthread_wire_libevent(void);
+#endif
 
 /* Basic event APIs */
 #define opal_event_enable_debug_mode() event_enable_debug_mode()

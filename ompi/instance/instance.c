@@ -409,11 +409,15 @@ static int ompi_mpi_instance_init_common (int argc, char **argv)
     OMPI_TIMING_IMPORT_OPAL("rte_init");
 
     ompi_rte_initialized = true;
-    /* if we are oversubscribed, then set yield_when_idle
-     * accordingly */
+    /* Oversubscribed vanilla pthread MPI: yield the kernel thread when
+     * opal_progress finds no events. Lithified builds use cooperative
+     * lithe_context_yield() only — never sched_yield(2) — and the Lithe
+     * scheduler owns oversubscription; leave yield_when_idle false. */
+#if !defined(HAVE_LITHE)
     if (ompi_mpi_oversubscribed) {
         ompi_mpi_yield_when_idle = true;
     }
+#endif
 
 
     /* Register the default errhandler callback  */

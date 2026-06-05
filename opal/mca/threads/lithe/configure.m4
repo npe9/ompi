@@ -72,9 +72,9 @@ AC_DEFUN([MCA_opal_threads_lithe_CONFIG],[
                        AS_IF([test -z "$opal_lithe_LDFLAGS"],
                              [opal_lithe_LDFLAGS="-L$opal_lithe_dir/lib"])
                        AS_IF([test -z "$opal_lithe_LIBS"],
-                             [opal_lithe_LIBS="-Wl,--start-group -lparlib -lithe -Wl,--end-group"])],
+                             [opal_lithe_LIBS="-Wl,--start-group -lparlib -llithe -Wl,--end-group"])],
                       [AS_IF([test -z "$opal_lithe_LIBS"],
-                             [opal_lithe_LIBS="-Wl,--start-group -lparlib -lithe -Wl,--end-group"])]) 
+                             [opal_lithe_LIBS="-Wl,--start-group -lparlib -llithe -Wl,--end-group"])]) 
 
            # Check if we can link against Lithe (use unique var names to avoid scope clash)
            opal_lithe_cpp_sv=$CPPFLAGS
@@ -85,10 +85,11 @@ AC_DEFUN([MCA_opal_threads_lithe_CONFIG],[
            CPPFLAGS=$opal_lithe_cpp_sv
            opal_lithe_ld_sv=$LDFLAGS
            LDFLAGS="$LDFLAGS $opal_lithe_LDFLAGS"
-           # libithe is the actual library name
-           # Check if library files exist (since linking test may fail due to dependencies)
-           # We'll verify actual linking works during the build
-           AS_IF([test -f "$opal_lithe_dir/lib/libithe.so" -o -f "$opal_lithe_dir/lib/libithe.a"],
+           # The actual library name is liblithe (lithe + ".lib*" prefix); check
+           # both .so and .a so static-only installs (e.g. --disable-shared)
+           # still satisfy the test. Same for libparlib.  We verify the actual
+           # link works during the build, not here.
+           AS_IF([test -f "$opal_lithe_dir/lib/liblithe.so" -o -f "$opal_lithe_dir/lib/liblithe.a"],
                  [AS_IF([test -f "$opal_lithe_dir/lib/libparlib.so" -o -f "$opal_lithe_dir/lib/libparlib.a"],
                         [opal_threads_lithe_happy="yes"],
                         [opal_threads_lithe_happy="no"])],

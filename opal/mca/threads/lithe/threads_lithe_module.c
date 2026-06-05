@@ -67,7 +67,12 @@ static int lithe_set_affinity(opal_thread_t *t, void *topo, int bitmap_index);
 static int lithe_get_affinity(opal_thread_t *t, void *topo, int bitmap_index);
 
 typedef void(opal_threads_pthreads_yield_fn_t)(void);
-static void yield_wrapper(void) { lithe_context_yield(); sched_yield(); }
+/* Yield the current uthread cooperatively to the Lithe scheduler. Do NOT
+ * call sched_yield(2): in a vcore-only build the vcore-backing pthread is
+ * owned by parlib; asking the kernel scheduler to switch it would defeat
+ * Lithe's cooperative model and (under oversubscription) flips
+ * ompi_mpi_yield_when_idle=true → 12k+ sched_yields/rank on the hot path. */
+static void yield_wrapper(void) { lithe_context_yield(); }
 __attribute__((visibility("default")))
 opal_threads_pthreads_yield_fn_t *opal_threads_pthreads_yield_fn = &yield_wrapper;
 
@@ -199,8 +204,9 @@ static int lithe_thread_equal(opal_thread_t t1, opal_thread_t t2) {
 
 static int lithe_yield_fn(void) {
     LITHE_ASSERT_VCORE();
+    /* Cooperative uthread yield only — no kernel sched_yield(2). See
+     * yield_wrapper() above for rationale. */
     lithe_context_yield();
-    sched_yield();
     return OPAL_SUCCESS;
 }
 

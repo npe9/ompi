@@ -24,7 +24,6 @@
 #include "opal_config.h"
 #include "opal/mca/threads/threads.h"
 #include "opal/mca/threads/lithe/threads_lithe_threads.h"
-#include <sched.h>
 #if defined(__GNUC__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-function"
@@ -130,13 +129,17 @@ static inline void opal_threads_lithe_ensure_init(void)
 }
 
 /**
- * Yield the current thread using Lithe
+ * Yield the current thread using Lithe.
+ *
+ * Cooperative uthread yield only — must NOT call sched_yield(2).
+ * In a vcore-only build the kernel scheduler does not own the
+ * vcore-backing pthread; cooperation goes through Lithe.  See
+ * `vcore-only-no-pthreads.mdc` and threads_lithe_module.c::yield_wrapper.
  */
 static inline void opal_thread_yield(void)
 {
     LITHE_ASSERT_VCORE();
     lithe_context_yield();
-    sched_yield();
 }
 
 END_C_DECLS

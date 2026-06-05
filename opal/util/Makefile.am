@@ -31,6 +31,10 @@ SUBDIRS = keyval
 
 dist_opaldata_DATA = help-opal-util.txt
 
+# Pulled in by opal/util/lithe_evthread_libevent.c and embedded OpenPMIx
+# (via #include path into this directory). Not a separate compile unit.
+EXTRA_DIST = lithe_evthread_libevent_impl.inc.c
+
 AM_LFLAGS = -Popal_show_help_yy
 LEX_OUTPUT_ROOT = lex.opal_show_help_yy
 
@@ -87,6 +91,7 @@ libopalutil_la_SOURCES = \
         $(headers) \
 	ethtool.c \
 	event.c \
+	lithe_evthread_libevent.c \
         if.c \
         net.c \
         info_subscriber.c \

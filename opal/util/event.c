@@ -24,6 +24,8 @@
 
 #include "opal/util/event.h"
 
+#include <stdlib.h>
+
 #include "opal/constants.h"
 #include "opal/mca/base/mca_base_var.h"
 #include "opal/util/argv.h"
@@ -134,8 +136,10 @@ int opal_event_init(void)
     }
     opal_argv_free(includes);
 
-    /* Declare our intent to use threads */
-    opal_event_use_threads();
+    if (0 != opal_event_use_threads()) {
+        opal_output(0, "opal_event_use_threads failed");
+        return OPAL_ERROR;
+    }
 
     /* get our event base */
     if (NULL == (opal_sync_event_base = opal_event_base_create())) {
@@ -173,4 +177,32 @@ opal_event_t *opal_event_alloc(void)
 
     ev = (opal_event_t *) malloc(sizeof(opal_event_t));
     return ev;
+}
+
+static int opal_evthread_configured = 0;
+
+int opal_event_use_threads(void)
+{
+    if (opal_evthread_configured) {
+        return 0;
+    }
+#if HAVE_LITHE
+    {
+        int rc = opal_lithe_evthread_wire_libevent();
+
+        if (0 == rc) {
+            opal_evthread_configured = 1;
+        }
+        return rc;
+    }
+#else
+    {
+        int rc = evthread_use_pthreads();
+
+        if (0 == rc) {
+            opal_evthread_configured = 1;
+        }
+        return rc;
+    }
+#endif
 }
