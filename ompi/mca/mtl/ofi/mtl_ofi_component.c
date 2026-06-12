@@ -1244,6 +1244,26 @@ select_prov:
         }
 
 #if HAVE_LITHE
+        /*
+         * Hosted multicontext (LITHE_CONTEXT_RANKS_PER_HOST>=2): one scalable-endpoint
+         * rx/tx pair per logical rank slot (vpid % RPH). Default num_ctxts=1 leaves
+         * only ctxt 0 and breaks Irecv/tag matching for higher slots.
+         */
+        {
+            unsigned long lith_rph = opal_lithe_env_cache_rph();
+            if (lith_rph >= 2UL) {
+                int want = (int) lith_rph;
+                if (want > max_ofi_ctxts) {
+                    want = max_ofi_ctxts;
+                }
+                if (want > ompi_mtl_ofi.num_ofi_contexts) {
+                    ompi_mtl_ofi.num_ofi_contexts = want;
+                }
+            }
+        }
+#endif
+
+#if HAVE_LITHE
         ompi_mtl_ofi.progress_block_enabled = true;
 #else
         ompi_mtl_ofi.progress_block_enabled = false;

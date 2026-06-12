@@ -441,13 +441,27 @@ int ompi_mtl_ofi_add_comm(struct mca_mtl_base_module_t *mtl,
          * for MPI_COMM_WORLD.
          */
         (!ompi_mtl_ofi.thread_grouping && (!ompi_mtl_ofi.is_initialized))) {
+        int ctxts_to_init = 1;
 
-        ret = ompi_mtl_ofi_init_contexts(mtl, comm, ep_type);
-        ompi_mtl_ofi.is_initialized = true;
-
-        if (OMPI_SUCCESS != ret) {
-            goto error;
+#if HAVE_LITHE
+        if (!ompi_mtl_ofi.thread_grouping && comm == &ompi_mpi_comm_world.comm) {
+            uint32_t rph = ompi_mtl_ofi_lithe_ranks_per_host();
+            if (rph > 1) {
+                ctxts_to_init = (int) rph;
+                if (ctxts_to_init > ompi_mtl_ofi.num_ofi_contexts) {
+                    ctxts_to_init = ompi_mtl_ofi.num_ofi_contexts;
+                }
+            }
         }
+#endif
+
+        for (int c = 0; c < ctxts_to_init; c++) {
+            ret = ompi_mtl_ofi_init_contexts(mtl, comm, ep_type);
+            if (OMPI_SUCCESS != ret) {
+                goto error;
+            }
+        }
+        ompi_mtl_ofi.is_initialized = true;
     }
 
 error:
