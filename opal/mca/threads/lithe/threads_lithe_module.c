@@ -87,22 +87,22 @@ struct lithe_thread_handle {
 
 void opal_threads_lithe_ensure_opal_fork_join_sched(void)
 {
+    /* Adopt the single, lithe-owned root fork-join scheduler instead of creating
+     * an OPAL-private one. This makes MPI/OPAL compose with any other lithified
+     * runtime (OpenMP, PMIx tools, UCX/OFI) under ONE root regardless of which
+     * runtime initialized first: whoever calls lithe_ensure_root_fork_join_sched
+     * first creates+enters it (bootstrapping main->vcore0 + the parlib vcore
+     * pool, owned by lithe/parlib), and everyone else gets the same root. This
+     * avoids a second conflicting bootstrap. See the
+     * lithe-bootstrap-any-runtime-combination rule. */
+    opal_sched = lithe_ensure_root_fork_join_sched();
     if (opal_sched == NULL) {
-        opal_sched = lithe_fork_join_sched_create();
-        if (opal_sched == NULL) {
-            fprintf(stderr, "[OPAL-Lithe] lithe_fork_join_sched_create returned NULL\n");
-            return;
-        }
+        fprintf(stderr, "[OPAL-Lithe] lithe_ensure_root_fork_join_sched returned NULL\n");
+        return;
     }
+    opal_sched_entered = lithe_root_fork_join_sched_entered();
     opal_lithe_pmix_export_sched = opal_sched;
     pmix_lithe_register_fork_join_sched(opal_sched);
-    if (!opal_sched_entered) {
-        lithe_sched_t *cur = lithe_sched_current();
-        if (cur != NULL) {
-            lithe_sched_enter((lithe_sched_t *)opal_sched);
-            opal_sched_entered = true;
-        }
-    }
 }
 
 /* OpenPMIx weak hook: pmix_thread_start may run before any OPAL mutex. */

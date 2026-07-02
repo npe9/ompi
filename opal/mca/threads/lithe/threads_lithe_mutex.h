@@ -88,31 +88,24 @@ extern __thread struct uthread *current_uthread;
         }                                                \
     } while (0)
 
-/* Hybrid mutex: lithe only on lock paths (pthread fields kept for struct layout / init) */
+/* Lithe-only mutual exclusion. No pthread fields: lithified runtimes must not
+ * use Linux mutual exclusion. See .cursor/rules/lithified-runtimes-no-linux-primitives.mdc */
 typedef struct {
     lithe_mutex_t lithe_lock;
-    pthread_mutex_t pthread_lock;
-    int use_pthread;  /* 1 if initialized for pthread fallback */
 } opal_thread_internal_mutex_t;
 
 typedef struct {
     lithe_condvar_t lithe_cond;
-    pthread_cond_t pthread_cond;
 } opal_thread_internal_cond_t;
 
 #define OPAL_THREAD_INTERNAL_MUTEX_INITIALIZER { \
-    .lithe_lock = { .attr = {0}, .queue = {NULL, NULL}, .lock = {0}, .qnode = NULL, .locked = 0, .owner = NULL }, \
-    .pthread_lock = PTHREAD_MUTEX_INITIALIZER, \
-    .use_pthread = 0 \
+    .lithe_lock = { .attr = {0}, .queue = {NULL, NULL}, .lock = {0}, .qnode = NULL, .locked = 0, .owner = NULL } \
 }
 #define OPAL_THREAD_INTERNAL_RECURSIVE_MUTEX_INITIALIZER { \
-    .lithe_lock = { .attr = {LITHE_MUTEX_RECURSIVE}, .queue = {NULL, NULL}, .lock = {0}, .qnode = NULL, .locked = 0, .owner = NULL }, \
-    .pthread_lock = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP, \
-    .use_pthread = 0 \
+    .lithe_lock = { .attr = {LITHE_MUTEX_RECURSIVE}, .queue = {NULL, NULL}, .lock = {0}, .qnode = NULL, .locked = 0, .owner = NULL } \
 }
 #define OPAL_THREAD_INTERNAL_COND_INITIALIZER { \
-    .lithe_cond = { .lock = {0}, .waiting_qnode = NULL, .waiting_mutex = NULL, .queue = {NULL, NULL} }, \
-    .pthread_cond = PTHREAD_COND_INITIALIZER \
+    .lithe_cond = { .lock = {0}, .waiting_qnode = NULL, .waiting_mutex = NULL, .queue = {NULL, NULL} } \
 }
 
 static inline int opal_thread_internal_mutex_init(opal_thread_internal_mutex_t *p_mutex, bool recursive)
@@ -123,15 +116,6 @@ static inline int opal_thread_internal_mutex_init(opal_thread_internal_mutex_t *
         lithe_mutexattr_settype(&attr, LITHE_MUTEX_RECURSIVE);
     }
     lithe_mutex_init(&p_mutex->lithe_lock, &attr);
-    
-    pthread_mutexattr_t pattr;
-    pthread_mutexattr_init(&pattr);
-    if (recursive) {
-        pthread_mutexattr_settype(&pattr, PTHREAD_MUTEX_RECURSIVE);
-    }
-    pthread_mutex_init(&p_mutex->pthread_lock, &pattr);
-    pthread_mutexattr_destroy(&pattr);
-    p_mutex->use_pthread = 0;
     return OPAL_SUCCESS;
 }
 
@@ -142,7 +126,8 @@ static inline int opal_thread_internal_mutex_init_recursive(opal_thread_internal
 
 static inline int opal_thread_internal_mutex_destroy(opal_thread_internal_mutex_t *p_mutex)
 {
-    pthread_mutex_destroy(&p_mutex->pthread_lock);
+    /* Lithe mutexes need no explicit destruction. */
+    (void) p_mutex;
     return OPAL_SUCCESS;
 }
 
@@ -174,13 +159,13 @@ static inline int opal_thread_internal_mutex_unlock(opal_thread_internal_mutex_t
 static inline int opal_thread_internal_cond_init(opal_thread_internal_cond_t *p_cond)
 {
     lithe_condvar_init(&p_cond->lithe_cond);
-    pthread_cond_init(&p_cond->pthread_cond, NULL);
     return OPAL_SUCCESS;
 }
 
 static inline int opal_thread_internal_cond_destroy(opal_thread_internal_cond_t *p_cond)
 {
-    pthread_cond_destroy(&p_cond->pthread_cond);
+    /* Lithe condvars need no explicit destruction. */
+    (void) p_cond;
     return OPAL_SUCCESS;
 }
 
