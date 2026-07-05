@@ -171,7 +171,8 @@ static int lithe_thread_create(opal_thread_fn_t func, void *arg,
     if (!opal_sched_entered || !opal_sched) return OPAL_ERROR;
 
     t->t_run = func;
-    lithe_fork_join_context_t *ctx = lithe_fork_join_context_create(opal_sched, 262144, lithe_wrapper, t);
+    lithe_fork_join_context_t *ctx =
+        lithe_fork_join_context_create_progress(262144, lithe_wrapper, t);
     if (!ctx) return OPAL_ERROR;
 
     struct lithe_thread_handle *h = malloc(sizeof(*h));
@@ -185,7 +186,11 @@ static int lithe_thread_join(opal_thread_t *t, void **exit_status) {
     LITHE_ASSERT_VCORE();
     if (!t->t_handle) return OPAL_ERR_BAD_PARAM;
     struct lithe_thread_handle *h = (struct lithe_thread_handle *)(uintptr_t)t->t_handle;
-    lithe_fork_join_sched_join_one(opal_sched);
+    lithe_fork_join_sched_t *sched =
+        (lithe_fork_join_sched_t *)h->ctx->context.sched;
+    if (!sched)
+        sched = opal_sched;
+    lithe_fork_join_sched_join_one(sched);
     lithe_fork_join_context_destroy(h->ctx);
     free(h);
     if (exit_status) *exit_status = NULL;

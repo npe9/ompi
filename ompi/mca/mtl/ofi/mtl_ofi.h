@@ -57,6 +57,8 @@
 
 #if HAVE_LITHE
 #include <parlib/reactor.h>
+#include <parlib/arch.h>
+#include <lithe/fork_join_sched.h>
 #include <stdlib.h>
 
 #include "opal/mca/threads/mutex.h"
@@ -465,6 +467,19 @@ ompi_mtl_ofi_context_progress_block(int ctxt_id)
     if (count > 0) {
         return count;
     }
+
+#if HAVE_LITHE
+    /* Tradespace: bounded spin before reactor park (LITHE_PROGRESS_SPIN_MAX). */
+    {
+        unsigned int spin_max = lithe_progress_spin_max();
+        for (unsigned int si = 0; si < spin_max; si++) {
+            count = ompi_mtl_ofi_context_progress(ctxt_id);
+            if (count > 0)
+                return count;
+            cpu_relax();
+        }
+    }
+#endif
 
     /* Lithe request waits are continuations, not pthread waits. Use OFI only
      * for its waitable readiness fd, then drain completions through OMPI's
