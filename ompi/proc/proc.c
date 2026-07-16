@@ -46,6 +46,7 @@
 #include "ompi/runtime/mpiruntime.h"
 #include "ompi/runtime/params.h"
 #include "ompi/mca/pml/pml.h"
+#include "opal/util/proc.h"
 
 opal_list_t  ompi_proc_list = {{0}};
 static opal_mutex_t ompi_proc_lock;
@@ -308,7 +309,14 @@ int ompi_proc_complete_init(void)
 
     opal_mutex_lock (&ompi_proc_lock);
 
-    /* Add all local peers first */
+    /* Add all local peers first.
+     *
+     * PMIx LOCAL_PEERS lists OS-process ranks. When hosted Lithe multicontext
+     * is active (LITHE_CONTEXT_RANKS_PER_HOST=RPH>1), each OS peer P expands to
+     * logical vpids P*RPH .. P*RPH+RPH-1. Without that expansion, peer tables
+     * and locality are keyed by OS ranks while COMM_WORLD uses logical ranks —
+     * multi-OS-process RPH>1 collectives hang or SEGV.
+     */
     wildcard_rank.jobid = OMPI_PROC_MY_NAME->jobid;
     wildcard_rank.vpid = OMPI_NAME_WILDCARD->vpid;
     /* retrieve the local peers */
@@ -317,22 +325,44 @@ int ompi_proc_complete_init(void)
     if (OPAL_SUCCESS == ret && NULL != val) {
         char **peers = opal_argv_split(val, ',');
         int i;
+        unsigned long rph = 1UL;
         free(val);
+        if (ompi_rte_lithe_hosted_multicontext_active) {
+            rph = opal_lithe_env_cache_rph();
+            if (rph < 2UL) {
+                rph = 1UL;
+            }
+        }
         for (i=0; NULL != peers[i]; i++) {
-            ompi_vpid_t local_rank = strtoul(peers[i], NULL, 10);
-            uint16_t u16, *u16ptr = &u16;
-            if (OMPI_PROC_MY_NAME->vpid == local_rank) {
-                continue;
-            }
-            ret = ompi_proc_allocate (OMPI_PROC_MY_NAME->jobid, local_rank, &proc);
-            if (OMPI_SUCCESS != ret) {
-                return ret;
-            }
-            /* get the locality information - all RTEs are required
-             * to provide this information at startup */
-            OPAL_MODEX_RECV_VALUE_OPTIONAL(ret, PMIX_LOCALITY, &proc->super.proc_name, &u16ptr, PMIX_UINT16);
-            if (OPAL_SUCCESS == ret) {
-                proc->super.proc_flags = u16;
+            ompi_vpid_t os_rank = (ompi_vpid_t) strtoul(peers[i], NULL, 10);
+            unsigned long k;
+            for (k = 0; k < rph; ++k) {
+                ompi_vpid_t logical_rank = (ompi_vpid_t) ((unsigned long) os_rank * rph + k);
+                uint16_t u16, *u16ptr = &u16;
+                if (OMPI_PROC_MY_NAME->vpid == logical_rank) {
+                    continue;
+                }
+                ret = ompi_proc_allocate (OMPI_PROC_MY_NAME->jobid, logical_rank, &proc);
+                if (OMPI_SUCCESS != ret) {
+                    opal_argv_free(peers);
+                    opal_mutex_unlock (&ompi_proc_lock);
+                    return ret;
+                }
+                /* Locality was stored under logical names in ompi_rte (hosted)
+                 * or under OS names (RPH==1). Prefer logical; fall back to OS. */
+                OPAL_MODEX_RECV_VALUE_OPTIONAL(ret, PMIX_LOCALITY,
+                                               &proc->super.proc_name, &u16ptr, PMIX_UINT16);
+                if (OPAL_SUCCESS != ret && rph > 1UL) {
+                    opal_process_name_t os_name = {
+                        .jobid = OMPI_PROC_MY_NAME->jobid,
+                        .vpid = os_rank,
+                    };
+                    OPAL_MODEX_RECV_VALUE_OPTIONAL(ret, PMIX_LOCALITY, &os_name, &u16ptr,
+                                                   PMIX_UINT16);
+                }
+                if (OPAL_SUCCESS == ret) {
+                    proc->super.proc_flags = u16;
+                }
             }
         }
         opal_argv_free(peers);

@@ -948,18 +948,33 @@ int ompi_rte_init(int *pargc, char ***pargv)
         goto error;
     }
 
-    /* set the locality */
+    /* set the locality
+     *
+     * Flux/PMIx LOCAL_PEERS are OS-process ranks. Hosted Lithe multicontext
+     * (LITHE_CONTEXT_RANKS_PER_HOST=RPH>1) expands each OS peer P into logical
+     * vpids P*RPH .. P*RPH+RPH-1 and stores PMIX_LOCALITY under those names so
+     * ompi_proc_complete_init / MTL lookups see logical ranks, not OS ranks.
+     */
     if (NULL != peers) {
+        uint32_t rph = (lithe_ranks_per_host > 1) ? lithe_ranks_per_host : 1;
         pname.jobid = opal_process_info.my_name.jobid;
         for (i=0; NULL != peers[i]; i++) {
-            pname.vpid = strtoul(peers[i], NULL, 10);
-            if (pname.vpid == opal_process_info.my_name.vpid) {
-                /* we are fully local to ourselves */
+            uint32_t os_rank = (uint32_t) strtoul(peers[i], NULL, 10);
+            uint32_t k;
+            opal_process_name_t os_pname;
+
+            os_pname.jobid = pname.jobid;
+            os_pname.vpid = (opal_vpid_t) os_rank;
+
+            if (rph > 1 && os_rank == lithe_host_vpid) {
+                /* Co-resident logical ranks share this OS process */
+                u16 = OPAL_PROC_ALL_LOCAL;
+            } else if (rph == 1 && os_rank == (uint32_t) opal_process_info.my_name.vpid) {
                 u16 = OPAL_PROC_ALL_LOCAL;
             } else {
                 val = NULL;
                 OPAL_MODEX_RECV_VALUE_OPTIONAL(rc, PMIX_LOCALITY_STRING,
-                                               &pname, &val, PMIX_STRING);
+                                               &os_pname, &val, PMIX_STRING);
                 if (PMIX_SUCCESS == rc && NULL != val) {
                     u16 = opal_hwloc_compute_relative_locality(opal_process_info.locality, val);
                     free(val);
@@ -970,13 +985,16 @@ int ompi_rte_init(int *pargc, char ***pargv)
             }
             pval.type = PMIX_UINT16;
             pval.data.uint16 = u16;
-            OPAL_PMIX_CONVERT_NAME(&rproc, &pname);
-            rc = PMIx_Store_internal(&rproc, PMIX_LOCALITY, &pval);
-            if (PMIX_SUCCESS != rc) {
-                ret = opal_pmix_convert_status(rc);
-                error = "local store of locality";
-                opal_argv_free(peers);
-                goto error;
+            for (k = 0; k < rph; ++k) {
+                pname.vpid = (opal_vpid_t) (os_rank * rph + k);
+                OPAL_PMIX_CONVERT_NAME(&rproc, &pname);
+                rc = PMIx_Store_internal(&rproc, PMIX_LOCALITY, &pval);
+                if (PMIX_SUCCESS != rc) {
+                    ret = opal_pmix_convert_status(rc);
+                    error = "local store of locality";
+                    opal_argv_free(peers);
+                    goto error;
+                }
             }
         }
         opal_argv_free(peers);

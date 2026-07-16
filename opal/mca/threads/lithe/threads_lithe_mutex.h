@@ -98,6 +98,11 @@ typedef struct {
     lithe_condvar_t lithe_cond;
 } opal_thread_internal_cond_t;
 
+/*
+ * queue={NULL,NULL} is not a finished TAILQ (tqh_last must be &tqh_first).
+ * lithe_mutex_lock / lithe_condvar_* lazily TAILQ_INIT when tqh_last==NULL so
+ * OPAL_MUTEX_STATIC_INIT (e.g. wait_sync_lock) is safe under contention.
+ */
 #define OPAL_THREAD_INTERNAL_MUTEX_INITIALIZER { \
     .lithe_lock = { .attr = {0}, .queue = {NULL, NULL}, .lock = {0}, .qnode = NULL, .locked = 0, .owner = NULL } \
 }
