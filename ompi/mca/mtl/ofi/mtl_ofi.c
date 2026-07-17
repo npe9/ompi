@@ -12,6 +12,8 @@
 
 #include "mtl_ofi.h"
 
+#include <string.h>
+
 OMPI_DECLSPEC extern mca_mtl_ofi_component_t mca_mtl_ofi_component;
 
 OBJ_CLASS_INSTANCE(mca_mtl_comm_t, opal_object_t, NULL, NULL);
@@ -290,6 +292,11 @@ ompi_mtl_ofi_add_procs(struct mca_mtl_base_module_t *mtl,
     }
 
     for (i = 0; i < nprocs; ++i) {
+        const char *insert_name = NULL;
+#if HAVE_LITHE
+        uint32_t magic = 0, n_eps = 0, name_len32 = 0;
+        uint32_t slot = 0;
+#endif
         /**
          * Retrieve the processes' EP name from modex.
          */
@@ -303,10 +310,42 @@ ompi_mtl_ofi_add_procs(struct mca_mtl_base_module_t *mtl,
             goto bail;
         }
 
+        insert_name = ep_name;
+#if HAVE_LITHE
+        /*
+         * Hosted multi regular-EP modex blob: magic + n + namelen + n names.
+         * Select the peer logical slot (vpid % RPH) so each Lithe context
+         * addresses a distinct peer EP when SEP is unavailable.
+         */
+        if (size >= 3 * sizeof(uint32_t)) {
+            memcpy(&magic, ep_name, sizeof(magic));
+            if (0x4c4d4550u == magic) {
+                memcpy(&n_eps, ep_name + sizeof(uint32_t), sizeof(n_eps));
+                memcpy(&name_len32, ep_name + 2 * sizeof(uint32_t), sizeof(name_len32));
+                if (n_eps >= 1 && name_len32 > 0 &&
+                    size == (size_t) (3 * sizeof(uint32_t)) +
+                            (size_t) n_eps * (size_t) name_len32) {
+                    uint32_t rph = ompi_mtl_ofi_lithe_ranks_per_host();
+                    opal_vpid_t v = procs[i]->super.proc_name.vpid;
+                    if (rph > 1 && v != OPAL_VPID_INVALID && v != OPAL_VPID_WILDCARD) {
+                        slot = (uint32_t) ((uint64_t) v % (uint64_t) rph);
+                    }
+                    if (slot >= n_eps) {
+                        slot %= n_eps;
+                    }
+                    insert_name = ep_name + 3 * sizeof(uint32_t) +
+                                  (size_t) slot * (size_t) name_len32;
+                    namelen = (size_t) name_len32;
+                    (void) namelen;
+                }
+            }
+        }
+#endif
+
         /**
          * Map the EP name to fi_addr.
          */
-        count = fi_av_insert(ompi_mtl_ofi.av, ep_name, 1, &fi_addrs[i], 0, NULL);
+        count = fi_av_insert(ompi_mtl_ofi.av, insert_name, 1, &fi_addrs[i], 0, NULL);
         if ((count < 0) || (1 != (size_t)count)) {
             opal_output_verbose(1, opal_common_ofi.output,
                                 "%s:%d: fi_av_insert failed for address %s: %d\n",
@@ -314,6 +353,23 @@ ompi_mtl_ofi_add_procs(struct mca_mtl_base_module_t *mtl,
             ret = OMPI_ERROR;
             goto bail;
         }
+#if HAVE_LITHE
+        if (NULL != getenv("LITHE_MTL_OFI_DEBUG")) {
+            unsigned long long h = 0;
+            size_t bi;
+            size_t nlen = (namelen > 0) ? namelen : 8;
+            for (bi = 0; bi < nlen && bi < 16; ++bi) {
+                h = (h * 131ull) + (unsigned char) insert_name[bi];
+            }
+            fprintf(stderr,
+                    "mtl_ofi add_procs: i=%zu vpid=%u slot=%u magic=0x%x n_eps=%u "
+                    "fi_addr=%llu name_hash=%llu size=%zu\n",
+                    i, (unsigned) procs[i]->super.proc_name.vpid, (unsigned) slot,
+                    (unsigned) magic, (unsigned) n_eps,
+                    (unsigned long long) fi_addrs[i], h, size);
+            fflush(stderr);
+        }
+#endif
     }
 
     /**
@@ -466,10 +522,16 @@ int ompi_mtl_ofi_add_comm(struct mca_mtl_base_module_t *mtl,
         if (NULL != getenv("LITHE_MTL_OFI_DEBUG")) {
             fprintf(stderr,
                     "mtl_ofi hosted: rph=%u num_ofi_contexts=%d total_ctxts_used=%d "
-                    "enable_sep=%d ctxts_to_init=%d\n",
+                    "enable_sep=%d hosted_multi_ep=%d ctxts_to_init=%d\n",
                     (unsigned) ompi_mtl_ofi_lithe_ranks_per_host(),
                     ompi_mtl_ofi.num_ofi_contexts, ompi_mtl_ofi.total_ctxts_used,
-                    ompi_mtl_ofi.enable_sep, ctxts_to_init);
+                    ompi_mtl_ofi.enable_sep,
+#if HAVE_LITHE
+                    ompi_mtl_ofi.hosted_multi_ep,
+#else
+                    0,
+#endif
+                    ctxts_to_init);
             fflush(stderr);
         }
 #endif

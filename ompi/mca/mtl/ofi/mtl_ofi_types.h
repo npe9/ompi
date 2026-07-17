@@ -104,6 +104,12 @@ typedef struct mca_mtl_ofi_module_t {
     bool has_posted_initial_buffer;
     bool hmem_needs_reg;
 
+#if HAVE_LITHE
+    /* Hosted RPH>=2 on providers without SEP (e.g. cxi max_ep_*_ctx=1):
+     * one regular EP+CQ per logical slot instead of a single shared EP. */
+    int hosted_multi_ep;
+#endif
+
 } mca_mtl_ofi_module_t;
 
 extern mca_mtl_ofi_module_t ompi_mtl_ofi;

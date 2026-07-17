@@ -351,6 +351,11 @@ ompi_mtl_ofi_sep_peer_rx_ctxt(struct ompi_proc_t *peer_proc, int local_ctxt)
     if (!ompi_mtl_ofi_lithe_multicontext_active()) {
         return local_ctxt;
     }
+    /* Multi regular-EP: peer_fiaddr already selects the peer's EP; do not
+     * apply SEP rx-ctxt encoding (rx_ctx_bits==0, but be explicit). */
+    if (ompi_mtl_ofi.hosted_multi_ep) {
+        return 0;
+    }
     rph = opal_lithe_env_cache_rph();
     if (rph < 2UL) {
         return local_ctxt;
@@ -486,14 +491,29 @@ ompi_mtl_ofi_context_progress_block(int ctxt_id)
     }
 
 #if HAVE_LITHE
-    /* Tradespace: bounded spin before reactor park (LITHE_PROGRESS_SPIN_MAX). */
+    /* Bounded CQ spin. Yield to RUNNABLE peers only under hart scarcity
+     * (lithe_fork_join_should_yield_to_runnable); yielding whenever
+     * runnable_count>0 causes a two-waiter yield-storm on VCORE>=K. */
     {
         unsigned int spin_max = lithe_progress_spin_max();
         for (unsigned int si = 0; si < spin_max; si++) {
             count = ompi_mtl_ofi_context_progress(ctxt_id);
             if (count > 0)
                 return count;
+            if (lithe_fork_join_should_yield_to_runnable()) {
+                lithe_context_yield();
+                count = ompi_mtl_ofi_context_progress(ctxt_id);
+                if (count > 0)
+                    return count;
+                continue;
+            }
             cpu_relax();
+        }
+        if (lithe_fork_join_should_yield_to_runnable()) {
+            lithe_context_yield();
+            count = ompi_mtl_ofi_context_progress(ctxt_id);
+            if (count > 0)
+                return count;
         }
     }
 #endif
@@ -668,6 +688,36 @@ ompi_mtl_ofi_progress_after_eagain(int ctxt_id)
  * Use MTL_OFI_RETRY_UNTIL_DONE_CTXT when ctxt_id is the OFI context index for this op
  * (required for Lithe multicontext correctness).
  */
+#if HAVE_LITHE
+/*
+ * Hosted + single regular EP (no SEP / no multi-EP): cxi is not safe for
+ * concurrent fi_t* from multiple Lithe contexts on one EP — Allreduce wrong
+ * sums at RPH>=4. Hold the ctxt lock only around the fabric post (not the
+ * wait), so peers can still enter the collective and progress.
+ */
+#define MTL_OFI_RETRY_UNTIL_DONE_CTXT(FUNC, RETURN, CTXT_ID)                 \
+    do {                                                                     \
+        do {                                                                 \
+            const int _mtl_ofi_ser_post =                                    \
+                (ompi_mtl_ofi_lithe_multicontext_active() &&                  \
+                 0 == ompi_mtl_ofi.enable_sep &&                             \
+                 0 == ompi_mtl_ofi.hosted_multi_ep);                         \
+            if (_mtl_ofi_ser_post) {                                         \
+                mtl_ofi_cq_context_enter_multicontext(CTXT_ID);              \
+            }                                                                \
+            RETURN = FUNC;                                                   \
+            if (_mtl_ofi_ser_post) {                                         \
+                mtl_ofi_cq_context_exit_multicontext(CTXT_ID);               \
+            }                                                                \
+            if (OPAL_LIKELY(0 == RETURN)) {                                  \
+                break;                                                       \
+            }                                                                \
+            if (OPAL_LIKELY(RETURN == -FI_EAGAIN)) {                         \
+                ompi_mtl_ofi_progress_after_eagain(CTXT_ID);                 \
+            }                                                                \
+        } while (OPAL_LIKELY(-FI_EAGAIN == RETURN));                        \
+    } while (0)
+#else
 #define MTL_OFI_RETRY_UNTIL_DONE_CTXT(FUNC, RETURN, CTXT_ID)  \
     do {                                                      \
         do {                                                  \
@@ -680,6 +730,7 @@ ompi_mtl_ofi_progress_after_eagain(int ctxt_id)
             }                                                 \
         } while (OPAL_LIKELY(-FI_EAGAIN == RETURN));         \
     } while (0)
+#endif
 
 #define MTL_OFI_RETRY_UNTIL_DONE(FUNC, RETURN) \
     MTL_OFI_RETRY_UNTIL_DONE_CTXT((FUNC), (RETURN), 0)

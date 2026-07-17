@@ -24,6 +24,7 @@
 
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 #if defined(__has_include)
 #    if __has_include(<parlib/dtls.h>)
@@ -741,6 +742,85 @@ static int ompi_mtl_ofi_init_regular_ep(struct fi_info * prov, int universe_size
     return ret;
 }
 
+#if HAVE_LITHE
+/*
+ * Hosted multicontext without provider SEP (cxi: max_ep_*_ctx=1, ep_cnt>>1):
+ * open one regular EP+CQ per logical slot so co-resident ranks do not share a
+ * single matching/CQ domain (wrong Allreduce sums at RPH>=4).
+ */
+static int ompi_mtl_ofi_init_multi_regular_ep(struct fi_info *prov, int universe_size,
+                                              int num_eps)
+{
+    int ret = OMPI_SUCCESS, i;
+    struct fi_av_attr av_attr = {0};
+    struct fi_cq_attr cq_attr = {0};
+
+    if (num_eps < 2) {
+        return ompi_mtl_ofi_init_regular_ep(prov, universe_size);
+    }
+
+    ompi_mtl_ofi_init_cq_attr(&cq_attr);
+    ompi_mtl_ofi.num_ofi_contexts = num_eps;
+    ompi_mtl_ofi.rx_ctx_bits = 0;
+    ompi_mtl_ofi.enable_sep = 0;
+    ompi_mtl_ofi.hosted_multi_ep = 1;
+
+    av_attr.type = (MTL_OFI_AV_TABLE == av_type) ? FI_AV_TABLE : FI_AV_MAP;
+    av_attr.count = (size_t) num_eps * (size_t) universe_size;
+    ret = fi_av_open(ompi_mtl_ofi.domain, &av_attr, &ompi_mtl_ofi.av, NULL);
+    if (ret) {
+        MTL_OFI_LOG_FI_ERR(ret, "fi_av_open failed");
+        return ret;
+    }
+
+    MTL_OFI_ALLOC_COMM_TO_CONTEXT(num_eps);
+    MTL_OFI_ALLOC_OFI_CTXTS();
+    memset(ompi_mtl_ofi.ofi_ctxt, 0, (size_t) num_eps * sizeof(mca_mtl_ofi_context_t));
+
+    for (i = 0; i < num_eps; ++i) {
+        struct fid_ep *ep = NULL;
+
+        ret = fi_endpoint(ompi_mtl_ofi.domain, prov, &ep, NULL);
+        if (0 != ret) {
+            opal_show_help("help-mtl-ofi.txt", "OFI call fail", true,
+                           "fi_endpoint",
+                           ompi_process_info.nodename, __FILE__, __LINE__,
+                           fi_strerror(-ret), -ret);
+            return ret;
+        }
+
+        ompi_mtl_ofi.ofi_ctxt[i].tx_ep = ep;
+        ompi_mtl_ofi.ofi_ctxt[i].rx_ep = ep;
+
+        ret = fi_ep_bind(ep, (fid_t) ompi_mtl_ofi.av, 0);
+        if (0 != ret) {
+            MTL_OFI_LOG_FI_ERR(ret, "fi_bind AV-EP failed");
+            return ret;
+        }
+
+        ret = ompi_mtl_ofi_open_cq(&cq_attr, &ompi_mtl_ofi.ofi_ctxt[i].cq,
+                                   &ompi_mtl_ofi.ofi_ctxt[i].cq_wait_fd);
+        if (ret) {
+            MTL_OFI_LOG_FI_ERR(ret, "fi_cq_open failed");
+            return ret;
+        }
+
+        ret = fi_ep_bind(ep, (fid_t) ompi_mtl_ofi.ofi_ctxt[i].cq,
+                         FI_TRANSMIT | FI_RECV | FI_SELECTIVE_COMPLETION);
+        if (0 != ret) {
+            MTL_OFI_LOG_FI_ERR(ret, "fi_bind CQ-EP failed");
+            return ret;
+        }
+    }
+
+    ompi_mtl_ofi.sep = ompi_mtl_ofi.ofi_ctxt[0].tx_ep;
+    opal_output_verbose(1, opal_common_ofi.output,
+                        "%s:%d: Lithe hosted multi regular EP: num_eps=%d (no SEP)\n",
+                        __FILE__, __LINE__, num_eps);
+    return OMPI_SUCCESS;
+}
+#endif /* HAVE_LITHE */
+
 static mca_mtl_base_module_t*
 ompi_mtl_ofi_component_init(bool enable_progress_threads,
                             bool enable_mpi_threads,
@@ -766,6 +846,9 @@ ompi_mtl_ofi_component_init(bool enable_progress_threads,
     opal_output_verbose(1, opal_common_ofi.output,
                         "%s:%d: mtl:ofi:provider_exclude = \"%s\"\n",
                         __FILE__, __LINE__, *opal_common_ofi.prov_exclude);
+#if HAVE_LITHE
+    ompi_mtl_ofi.hosted_multi_ep = 0;
+#endif
 
     if (NULL != *opal_common_ofi.prov_include) {
         include_list = opal_argv_split(*opal_common_ofi.prov_include, ',');
@@ -1318,11 +1401,35 @@ select_prov:
     } else {
 #if HAVE_LITHE
         ompi_mtl_ofi.progress_block_enabled = true;
+        {
+            unsigned long lith_rph = opal_lithe_env_cache_rph();
+            /* Multi regular-EP is opt-in: LITHE_MTL_OFI_MULTI_EP=1. Default stays
+             * single-EP + serialized fi_t* posts (see MTL_OFI_RETRY_UNTIL_DONE_CTXT)
+             * until multi-EP loopback/progress is proven on cxi. */
+            const char *multi_env = getenv("LITHE_MTL_OFI_MULTI_EP");
+            int want_multi = (NULL != multi_env && multi_env[0] != '\0' &&
+                              multi_env[0] != '0');
+            if (want_multi && lith_rph >= 2UL && 0 == sep_support_in_provider) {
+                int want = (int) lith_rph;
+                size_t ep_cnt = prov->domain_attr->ep_cnt;
+                if (ep_cnt > 0 && want > (int) ep_cnt) {
+                    want = (int) ep_cnt;
+                }
+                ret = ompi_mtl_ofi_init_multi_regular_ep(prov, universe_size, want);
+                /* Multi-EP: avoid blocking on a single CQ wait_fd while
+                 * co-resident ranks need peer CQ drain (lost-wakeup hang). */
+                if (OMPI_SUCCESS == ret) {
+                    ompi_mtl_ofi.progress_block_enabled = false;
+                }
+            } else {
+                ompi_mtl_ofi.hosted_multi_ep = 0;
+                ret = ompi_mtl_ofi_init_regular_ep(prov, universe_size);
+            }
+        }
 #else
         ompi_mtl_ofi.progress_block_enabled = false;
-#endif
-
         ret = ompi_mtl_ofi_init_regular_ep(prov, universe_size);
+#endif
     }
 
     if (OMPI_SUCCESS != ret) {
@@ -1332,11 +1439,25 @@ select_prov:
     ompi_mtl_ofi.total_ctxts_used = 0;
     ompi_mtl_ofi.threshold_comm_context_id = 0;
 
-    /* Enable Endpoint for communication */
-    ret = fi_enable(ompi_mtl_ofi.sep);
-    if (0 != ret) {
-        MTL_OFI_LOG_FI_ERR(ret, "fi_enable failed");
-        goto error;
+    /* Enable Endpoint(s) for communication */
+#if HAVE_LITHE
+    if (ompi_mtl_ofi.hosted_multi_ep) {
+        int epi;
+        for (epi = 0; epi < ompi_mtl_ofi.num_ofi_contexts; ++epi) {
+            ret = fi_enable(ompi_mtl_ofi.ofi_ctxt[epi].tx_ep);
+            if (0 != ret) {
+                MTL_OFI_LOG_FI_ERR(ret, "fi_enable failed");
+                goto error;
+            }
+        }
+    } else
+#endif
+    {
+        ret = fi_enable(ompi_mtl_ofi.sep);
+        if (0 != ret) {
+            MTL_OFI_LOG_FI_ERR(ret, "fi_enable failed");
+            goto error;
+        }
     }
 
     ompi_mtl_ofi.provider_name = strdup(prov->fabric_attr->prov_name);
@@ -1349,12 +1470,91 @@ select_prov:
     fi_freeinfo(providers);
     providers = NULL;
 
-    ret = opal_common_ofi_fi_getname((fid_t)ompi_mtl_ofi.sep,
-                                     &ep_name,
-                                     &namelen);
-    if (OMPI_SUCCESS != ret) {
-        MTL_OFI_LOG_FI_ERR(ret, "opal_common_ofi_fi_getname failed");
-        goto error;
+#if HAVE_LITHE
+    if (ompi_mtl_ofi.hosted_multi_ep) {
+        /* Pack K EP names: magic(u32) + n(u32) + namelen(u32) + n*namelen bytes */
+        uint32_t n_eps = (uint32_t) ompi_mtl_ofi.num_ofi_contexts;
+        uint32_t name_len32 = 0;
+        size_t blob_size, off;
+        char *blob = NULL;
+        void **names = calloc(n_eps, sizeof(void *));
+        size_t *name_lens = calloc(n_eps, sizeof(size_t));
+        uint32_t epi;
+
+        if (NULL == names || NULL == name_lens) {
+            free(names);
+            free(name_lens);
+            ret = OMPI_ERR_OUT_OF_RESOURCE;
+            goto error;
+        }
+        for (epi = 0; epi < n_eps; ++epi) {
+            ret = opal_common_ofi_fi_getname((fid_t) ompi_mtl_ofi.ofi_ctxt[epi].tx_ep,
+                                             &names[epi], &name_lens[epi]);
+            if (OMPI_SUCCESS != ret) {
+                MTL_OFI_LOG_FI_ERR(ret, "opal_common_ofi_fi_getname failed");
+                for (uint32_t j = 0; j < epi; ++j) {
+                    free(names[j]);
+                }
+                free(names);
+                free(name_lens);
+                goto error;
+            }
+            if (0 == epi) {
+                name_len32 = (uint32_t) name_lens[epi];
+            } else if (name_lens[epi] != (size_t) name_len32) {
+                opal_output(0, "%s:%d: hosted multi-EP name length mismatch\n",
+                            __FILE__, __LINE__);
+                for (uint32_t j = 0; j <= epi; ++j) {
+                    free(names[j]);
+                }
+                free(names);
+                free(name_lens);
+                ret = OMPI_ERROR;
+                goto error;
+            }
+        }
+        blob_size = (size_t) (3 * sizeof(uint32_t)) + (size_t) n_eps * (size_t) name_len32;
+        blob = malloc(blob_size);
+        if (NULL == blob) {
+            for (epi = 0; epi < n_eps; ++epi) {
+                free(names[epi]);
+            }
+            free(names);
+            free(name_lens);
+            ret = OMPI_ERR_OUT_OF_RESOURCE;
+            goto error;
+        }
+        off = 0;
+        {
+            uint32_t magic = 0x4c4d4550u; /* 'LMEP' */
+            memcpy(blob + off, &magic, sizeof(magic));
+            off += sizeof(magic);
+            memcpy(blob + off, &n_eps, sizeof(n_eps));
+            off += sizeof(n_eps);
+            memcpy(blob + off, &name_len32, sizeof(name_len32));
+            off += sizeof(name_len32);
+        }
+        for (epi = 0; epi < n_eps; ++epi) {
+            memcpy(blob + off, names[epi], name_len32);
+            off += name_len32;
+            free(names[epi]);
+        }
+        free(names);
+        free(name_lens);
+        ep_name = blob;
+        namelen = blob_size;
+        ompi_mtl_ofi.epnamelen = (size_t) name_len32;
+    } else
+#endif
+    {
+        ret = opal_common_ofi_fi_getname((fid_t)ompi_mtl_ofi.sep,
+                                         &ep_name,
+                                         &namelen);
+        if (OMPI_SUCCESS != ret) {
+            MTL_OFI_LOG_FI_ERR(ret, "opal_common_ofi_fi_getname failed");
+            goto error;
+        }
+        ompi_mtl_ofi.epnamelen = namelen;
     }
 
     OFI_COMPAT_MODEX_SEND(ret,
@@ -1368,8 +1568,8 @@ select_prov:
         goto error;
     }
 
-    ompi_mtl_ofi.epnamelen = namelen;
     free(ep_name);
+    ep_name = NULL;
 
     /**
      * Set the ANY_SRC address.
@@ -1448,25 +1648,49 @@ ompi_mtl_ofi_finalize(struct mca_mtl_base_module_t *mtl)
     opal_progress_set_block_callback(NULL);
 #endif
 
-    /* Close all the OFI objects */
-    if ((ret = fi_close((fid_t)ompi_mtl_ofi.sep))) {
-        goto finalize_err;
+#if HAVE_LITHE
+    if (ompi_mtl_ofi.hosted_multi_ep) {
+        int i;
+        /* Close each regular EP then its CQ (EPs share the AV). */
+        for (i = 0; i < ompi_mtl_ofi.num_ofi_contexts; ++i) {
+            if (NULL != ompi_mtl_ofi.ofi_ctxt[i].tx_ep) {
+                if ((ret = fi_close((fid_t) ompi_mtl_ofi.ofi_ctxt[i].tx_ep))) {
+                    goto finalize_err;
+                }
+                ompi_mtl_ofi.ofi_ctxt[i].tx_ep = NULL;
+                ompi_mtl_ofi.ofi_ctxt[i].rx_ep = NULL;
+            }
+            if (NULL != ompi_mtl_ofi.ofi_ctxt[i].cq) {
+                if ((ret = fi_close((fid_t) ompi_mtl_ofi.ofi_ctxt[i].cq))) {
+                    goto finalize_err;
+                }
+                ompi_mtl_ofi.ofi_ctxt[i].cq = NULL;
+            }
+        }
+        ompi_mtl_ofi.sep = NULL;
+    } else
+#endif
+    {
+        /* Close all the OFI objects */
+        if ((ret = fi_close((fid_t)ompi_mtl_ofi.sep))) {
+            goto finalize_err;
+        }
+
+        if (0 == ompi_mtl_ofi.enable_sep) {
+            /*
+             * CQ[0] is bound to the EP when SEP is not supported by a
+             * provider. OFI spec requires that we close the Endpoint that is bound
+             * to the CQ before closing the CQ itself. So, for the non-SEP case, we
+             * handle the closing of CQ[0] here.
+             */
+            if ((ret = fi_close((fid_t)ompi_mtl_ofi.ofi_ctxt[0].cq))) {
+                goto finalize_err;
+            }
+        }
     }
 
     if ((ret = fi_close((fid_t)ompi_mtl_ofi.av))) {
         goto finalize_err;
-    }
-
-    if (0 == ompi_mtl_ofi.enable_sep) {
-        /*
-         * CQ[0] is bound to SEP object Nwhen SEP is not supported by a
-         * provider. OFI spec requires that we close the Endpoint that is bound
-         * to the CQ before closing the CQ itself. So, for the non-SEP case, we
-         * handle the closing of CQ[0] here.
-         */
-        if ((ret = fi_close((fid_t)ompi_mtl_ofi.ofi_ctxt[0].cq))) {
-            goto finalize_err;
-        }
     }
 
     if ((ret = fi_close((fid_t)ompi_mtl_ofi.domain))) {
