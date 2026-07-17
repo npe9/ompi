@@ -1098,6 +1098,25 @@ select_prov:
         sep_support_in_provider = 1;
     }
 
+#if HAVE_LITHE
+    /*
+     * Hosted multicontext (RPH>=2): prefer SEP (one rx/tx ctxt per logical
+     * slot). MCA default enable_sep=0. Auto-enable only when the provider
+     * advertises max_ep_*_ctx>1 — cxi on this site reports 1 (no SEP); forcing
+     * SEP then aborts. Without SEP, keep K small per OS process (see HOSTED_RANKS).
+     */
+    {
+        unsigned long lith_rph = opal_lithe_env_cache_rph();
+        if (lith_rph >= 2UL && 0 == ompi_mtl_ofi.enable_sep &&
+            0 != sep_support_in_provider) {
+            ompi_mtl_ofi.enable_sep = 1;
+            opal_output_verbose(1, opal_common_ofi.output,
+                                "%s:%d: Lithe hosted RPH=%lu: enabling OFI SEP\n",
+                                __FILE__, __LINE__, lith_rph);
+        }
+    }
+#endif
+
     if (1 == ompi_mtl_ofi.enable_sep) {
         if (0 == sep_support_in_provider) {
             opal_show_help("help-mtl-ofi.txt", "SEP unavailable", true,
@@ -1222,6 +1241,31 @@ select_prov:
                          prov->domain_attr->max_ep_rx_ctx;
 
         num_local_ranks = 1 + ompi_process_info.num_local_peers;
+#if HAVE_LITHE
+        /*
+         * Hosted mode expands LOCAL_PEERS to logical vpids (P*K). SEP budget must
+         * divide provider ctxts by OS processes on the node, not logical ranks —
+         * otherwise max_ofi_ctxts collapses (e.g. 128/16=8) and vpid%RPH aliases
+         * for K>8 (wrong Allreduce sums / hangs).
+         */
+        {
+            unsigned long lith_rph = opal_lithe_env_cache_rph();
+            int sep_budget_peers = num_local_ranks;
+            if (lith_rph >= 2UL) {
+                sep_budget_peers = (num_local_ranks + (int) lith_rph - 1) / (int) lith_rph;
+                if (sep_budget_peers < 1) {
+                    sep_budget_peers = 1;
+                }
+            }
+            if (max_ofi_ctxts <= sep_budget_peers) {
+                opal_show_help("help-mtl-ofi.txt", "Local ranks exceed ofi contexts",
+                               true, prov->fabric_attr->prov_name,
+                               ompi_process_info.nodename, __FILE__, __LINE__);
+                goto error;
+            }
+            max_ofi_ctxts /= sep_budget_peers;
+        }
+#else
         if (max_ofi_ctxts <= num_local_ranks) {
             opal_show_help("help-mtl-ofi.txt", "Local ranks exceed ofi contexts",
                            true, prov->fabric_attr->prov_name,
@@ -1231,6 +1275,7 @@ select_prov:
 
         /* Provision enough contexts to service all ranks in a node */
         max_ofi_ctxts /= num_local_ranks;
+#endif
 
         /*
          *  If num ctxts user specified is more than max allowed, limit to max

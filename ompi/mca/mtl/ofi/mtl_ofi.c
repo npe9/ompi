@@ -462,6 +462,17 @@ int ompi_mtl_ofi_add_comm(struct mca_mtl_base_module_t *mtl,
             }
         }
         ompi_mtl_ofi.is_initialized = true;
+#if HAVE_LITHE
+        if (NULL != getenv("LITHE_MTL_OFI_DEBUG")) {
+            fprintf(stderr,
+                    "mtl_ofi hosted: rph=%u num_ofi_contexts=%d total_ctxts_used=%d "
+                    "enable_sep=%d ctxts_to_init=%d\n",
+                    (unsigned) ompi_mtl_ofi_lithe_ranks_per_host(),
+                    ompi_mtl_ofi.num_ofi_contexts, ompi_mtl_ofi.total_ctxts_used,
+                    ompi_mtl_ofi.enable_sep, ctxts_to_init);
+            fflush(stderr);
+        }
+#endif
     }
 
 error:
