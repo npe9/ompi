@@ -111,20 +111,24 @@ typedef struct mca_mtl_ofi_module_t {
      * one regular EP+CQ per logical slot instead of a single shared EP. */
     int hosted_multi_ep;
     /*
-     * Hosted RPH>=2 + no SEP + FI_REMOTE_CQ_DATA: embed co-resident slot
-     * (rank % RPH) in the CQD match tag. Directed-recv cannot distinguish
-     * co-resident ranks that share one regular EP address. Cross-node peers
-     * still differ by EP address.
+     * Hosted RPH>=2 + no SEP + FI_REMOTE_CQ_DATA: embed *dest and source*
+     * co-resident slots (rank % RPH) in the CQD match tag.
      *
-     * Bits are placed only where provider mem_tag_format is 1. cxi uses
-     * 0x0000aaaaaaaaaaaa (odd bits only) — contiguous <<34 packing puts the
-     * low slot bit on an ignored even bit and collapses slots 0↔1, 2↔3.
+     * One shared EP: all co-resident ranks share one fi_addr, so
+     * FI_DIRECTED_RECV cannot isolate sources. Dest-slot alone demuxes
+     * concurrent receivers, but recursive-doubling Allreduce reuses one
+     * MPI tag across rounds — an early round-N send can match a still-posted
+     * round-(N-1) recv on the same dest slot (FI_ADDR_UNSPEC). Packing both
+     * dest and source slots prevents that. Recvs use FI_ADDR_UNSPEC;
+     * MPI_SOURCE still comes from FI_REMOTE_CQ_DATA.
+     *
+     * Bits are placed only where provider mem_tag_format is 1 (usable).
      */
-    int hosted_src_in_cqd_tag;
-    int hosted_cqd_src_bits;   /* ceil(log2(RPH)), clipped to usable budget */
+    int hosted_dst_in_cqd_tag;
+    int hosted_cqd_src_bits;   /* ceil(log2(RPH)) bits each for dest and src */
     int hosted_cqd_cid_bits;   /* remaining usable upper bits for cid */
-    /* Ascending bit positions (0..63) for slot then cid in the match tag. */
-    uint8_t hosted_cqd_slot_bitpos[8];
+    /* Bit positions: [0..src_bits) dest, [src_bits..2*src_bits) source, then cid. */
+    uint8_t hosted_cqd_slot_bitpos[16];
     uint8_t hosted_cqd_cid_bitpos[24];
 #endif
 
@@ -184,27 +188,33 @@ typedef enum {
 #if HAVE_LITHE
 /* Co-resident slot for hosted no-SEP CQD match isolation (rank % RPH). */
 __opal_attribute_always_inline__ static inline uint64_t
-mtl_ofi_hosted_cqd_slot(int source)
+mtl_ofi_hosted_cqd_slot(int rank)
 {
     unsigned long rph = opal_lithe_env_cache_rph();
-    if (rph < 2UL || source < 0) {
-        return (uint64_t) (unsigned) source;
+    if (rph < 2UL || rank < 0) {
+        return (uint64_t) (unsigned) rank;
     }
-    return (uint64_t) ((unsigned) source % (unsigned) rph);
+    return (uint64_t) ((unsigned) rank % (unsigned) rph);
 }
 
-/* Pack cid+slot into provider-usable bit positions (sparse mem_tag_format). */
+/* Pack cid + dest_slot + src_slot into provider-usable bit positions. */
 __opal_attribute_always_inline__ static inline uint64_t
-mtl_ofi_hosted_cqd_pack_upper(uint64_t cid, uint64_t slot)
+mtl_ofi_hosted_cqd_pack_upper(uint64_t cid, uint64_t dest_slot,
+                              uint64_t src_slot)
 {
     uint64_t bits = 0;
     int i;
-    int src_bits = ompi_mtl_ofi.hosted_cqd_src_bits;
+    int sb = ompi_mtl_ofi.hosted_cqd_src_bits;
     int cid_bits = ompi_mtl_ofi.hosted_cqd_cid_bits;
 
-    for (i = 0; i < src_bits; ++i) {
-        if (slot & (1ULL << i)) {
+    for (i = 0; i < sb; ++i) {
+        if (dest_slot & (1ULL << i)) {
             bits |= (1ULL << ompi_mtl_ofi.hosted_cqd_slot_bitpos[i]);
+        }
+    }
+    for (i = 0; i < sb; ++i) {
+        if (src_slot & (1ULL << i)) {
+            bits |= (1ULL << ompi_mtl_ofi.hosted_cqd_slot_bitpos[sb + i]);
         }
     }
     for (i = 0; i < cid_bits; ++i) {
@@ -216,39 +226,41 @@ mtl_ofi_hosted_cqd_pack_upper(uint64_t cid, uint64_t slot)
 }
 
 __opal_attribute_always_inline__ static inline uint64_t
-mtl_ofi_hosted_cqd_slot_mask(void)
+mtl_ofi_hosted_cqd_src_slot_mask_bits(void)
 {
     uint64_t mask = 0;
     int i;
-    for (i = 0; i < ompi_mtl_ofi.hosted_cqd_src_bits; ++i) {
-        mask |= (1ULL << ompi_mtl_ofi.hosted_cqd_slot_bitpos[i]);
+    int sb = ompi_mtl_ofi.hosted_cqd_src_bits;
+    for (i = 0; i < sb; ++i) {
+        mask |= (1ULL << ompi_mtl_ofi.hosted_cqd_slot_bitpos[sb + i]);
     }
     return mask;
 }
 #endif
 
-/* Send tag with CQ_DATA */
+/* Send tag with CQ_DATA.
+ * Hosted no-SEP: embed dest slot and local (source) slot. */
 __opal_attribute_always_inline__ static inline uint64_t
-mtl_ofi_create_send_tag_CQD(int comm_id, int tag, int source)
+mtl_ofi_create_send_tag_CQD(int comm_id, int tag, int dest)
 {
     uint64_t  match_bits = (uint64_t) comm_id;
 #if HAVE_LITHE
-    if (ompi_mtl_ofi.hosted_src_in_cqd_tag &&
+    if (ompi_mtl_ofi.hosted_dst_in_cqd_tag &&
         ompi_mtl_ofi.hosted_cqd_src_bits > 0) {
         int cid_bits = ompi_mtl_ofi.hosted_cqd_cid_bits;
+        int sb = ompi_mtl_ofi.hosted_cqd_src_bits;
         uint64_t cid_mask = (cid_bits >= 63) ? ~0ULL : ((1ULL << cid_bits) - 1ULL);
-        uint64_t src_mask =
-            (ompi_mtl_ofi.hosted_cqd_src_bits >= 63)
-                ? ~0ULL
-                : ((1ULL << ompi_mtl_ofi.hosted_cqd_src_bits) - 1ULL);
-        uint64_t slot = mtl_ofi_hosted_cqd_slot(source) & src_mask;
+        uint64_t slot_mask = (sb >= 63) ? ~0ULL : ((1ULL << sb) - 1ULL);
+        opal_vpid_t self_v = opal_proc_local_get()->proc_name.vpid;
+        uint64_t dslot = mtl_ofi_hosted_cqd_slot(dest) & slot_mask;
+        uint64_t sslot = mtl_ofi_hosted_cqd_slot((int) self_v) & slot_mask;
         uint64_t cid = (uint64_t) comm_id & cid_mask;
-        match_bits = mtl_ofi_hosted_cqd_pack_upper(cid, slot);
+        match_bits = mtl_ofi_hosted_cqd_pack_upper(cid, dslot, sslot);
         match_bits |= (tag & MTL_OFI_TAG_MASK_DATA);
         return match_bits;
     }
 #else
-    (void) source;
+    (void) dest;
 #endif
     match_bits = (match_bits << (MTL_OFI_TAG_BIT_COUNT_DATA
                                 + MTL_OFI_PROTO_BIT_COUNT));
@@ -256,7 +268,9 @@ mtl_ofi_create_send_tag_CQD(int comm_id, int tag, int source)
     return match_bits;
 }
 
-/* Receive tag with CQ_DATA */
+/* Receive tag with CQ_DATA.
+ * Hosted no-SEP: match local dest slot + expected source slot. ANY_SOURCE
+ * ignores source-slot bits; dest slot is always required. */
 __opal_attribute_always_inline__ static inline void
 mtl_ofi_create_recv_tag_CQD(uint64_t *match_bits, uint64_t *mask_bits,
                             int comm_id, int tag, int source)
@@ -264,23 +278,23 @@ mtl_ofi_create_recv_tag_CQD(uint64_t *match_bits, uint64_t *mask_bits,
     *mask_bits  = ompi_mtl_ofi.sync_send;
     *match_bits = (uint64_t) comm_id;
 #if HAVE_LITHE
-    if (ompi_mtl_ofi.hosted_src_in_cqd_tag &&
+    if (ompi_mtl_ofi.hosted_dst_in_cqd_tag &&
         ompi_mtl_ofi.hosted_cqd_src_bits > 0) {
         int cid_bits = ompi_mtl_ofi.hosted_cqd_cid_bits;
+        int sb = ompi_mtl_ofi.hosted_cqd_src_bits;
         uint64_t cid_mask = (cid_bits >= 63) ? ~0ULL : ((1ULL << cid_bits) - 1ULL);
-        uint64_t src_mask =
-            (ompi_mtl_ofi.hosted_cqd_src_bits >= 63)
-                ? ~0ULL
-                : ((1ULL << ompi_mtl_ofi.hosted_cqd_src_bits) - 1ULL);
+        uint64_t slot_mask = (sb >= 63) ? ~0ULL : ((1ULL << sb) - 1ULL);
         uint64_t cid = (uint64_t) comm_id & cid_mask;
-        uint64_t slot = 0;
+        opal_vpid_t self_v = opal_proc_local_get()->proc_name.vpid;
+        uint64_t dslot = mtl_ofi_hosted_cqd_slot((int) self_v) & slot_mask;
+        uint64_t sslot = 0;
 
+        if (MPI_ANY_SOURCE != source) {
+            sslot = mtl_ofi_hosted_cqd_slot(source) & slot_mask;
+        }
+        *match_bits = mtl_ofi_hosted_cqd_pack_upper(cid, dslot, sslot);
         if (MPI_ANY_SOURCE == source) {
-            *match_bits = mtl_ofi_hosted_cqd_pack_upper(cid, 0);
-            *mask_bits |= mtl_ofi_hosted_cqd_slot_mask();
-        } else {
-            slot = mtl_ofi_hosted_cqd_slot(source) & src_mask;
-            *match_bits = mtl_ofi_hosted_cqd_pack_upper(cid, slot);
+            *mask_bits |= mtl_ofi_hosted_cqd_src_slot_mask_bits();
         }
         if (MPI_ANY_TAG == tag) {
             *mask_bits |= (ompi_mtl_ofi.mpi_tag_mask >> 1);

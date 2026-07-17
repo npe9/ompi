@@ -849,7 +849,7 @@ ompi_mtl_ofi_component_init(bool enable_progress_threads,
                         __FILE__, __LINE__, *opal_common_ofi.prov_exclude);
 #if HAVE_LITHE
     ompi_mtl_ofi.hosted_multi_ep = 0;
-    ompi_mtl_ofi.hosted_src_in_cqd_tag = 0;
+    ompi_mtl_ofi.hosted_dst_in_cqd_tag = 0;
     ompi_mtl_ofi.hosted_cqd_src_bits = 0;
     ompi_mtl_ofi.hosted_cqd_cid_bits = 0;
     memset(ompi_mtl_ofi.hosted_cqd_slot_bitpos, 0,
@@ -1119,9 +1119,8 @@ select_prov:
                 /*
                  * Hosted ranks (RPH>=2) on providers without SEP share one
                  * regular EP address, so FI_DIRECTED_RECV cannot isolate
-                 * co-resident sources (Allreduce wrong sums). Keep CQD/FULL
-                 * bit layout for the provider, but embed co-resident slot
-                 * (rank%RPH) in the match tag (see mtl_ofi_create_*_tag_CQD).
+                 * co-resident peers. Embed dest+src slots in the CQD match
+                 * tag (see mtl_ofi_create_*_tag_CQD).
                  */
                 {
                     int sep_ok = (prov->domain_attr->max_ep_tx_ctx > 1) ||
@@ -1130,13 +1129,13 @@ select_prov:
                     if (!sep_ok && lith_rph >= 2UL) {
                         /* Flag only here; shrink cid after mem_tag_format so
                          * the provider high-bit check still uses FULL width. */
-                        ompi_mtl_ofi.hosted_src_in_cqd_tag = 1;
+                        ompi_mtl_ofi.hosted_dst_in_cqd_tag = 1;
                         opal_output_verbose(
                             1, opal_common_ofi.output,
-                            "%s:%d: Lithe hosted no-SEP: will embed slot in CQD "
-                            "tag; provider=%s rph=%lu\n",
-                            __FILE__, __LINE__, prov->fabric_attr->prov_name,
-                            lith_rph);
+                            "%s:%d: Lithe hosted no-SEP: will embed dest+src "
+                            "slots in CQD tag; provider=%s rph=%lu\n",
+                            __FILE__, __LINE__,
+                            prov->fabric_attr->prov_name, lith_rph);
                     }
                 }
 #endif
@@ -1213,7 +1212,7 @@ select_prov:
      * even positions and collapse slots. Cross-node peers still differ by
      * FI_DIRECTED_RECV addresses.
      */
-    if (ompi_mtl_ofi.hosted_src_in_cqd_tag) {
+    if (ompi_mtl_ofi.hosted_dst_in_cqd_tag) {
         unsigned long lith_rph = opal_lithe_env_cache_rph();
         int need_src = 0;
         unsigned long r;
@@ -1223,7 +1222,7 @@ select_prov:
         int b, i;
 
         if (lith_rph < 2UL) {
-            ompi_mtl_ofi.hosted_src_in_cqd_tag = 0;
+            ompi_mtl_ofi.hosted_dst_in_cqd_tag = 0;
         } else {
             r = lith_rph;
             while ((1UL << need_src) < r) {
@@ -1237,44 +1236,54 @@ select_prov:
                     }
                 }
             }
-            /* Need slot bits + at least 1 cid bit (WORLD uses cid 0). Do not
-             * require MTL_OFI_MINIMUM_CID_BITS — cxi only has ~7 usable upper
-             * bits total. */
-            if (need_src < 1 || need_src > 8 || n_usable < need_src + 1) {
-                opal_output_verbose(
-                    1, opal_common_ofi.output,
-                    "%s:%d: Lithe hosted no-SEP: only %d usable upper tag bits "
-                    "(mem_tag_format=0x%016" PRIx64 "); need %d slot + cid for "
-                    "rph=%lu. Leaving CQD-only.\n",
-                    __FILE__, __LINE__, n_usable, (uint64_t) fmt, need_src,
-                    lith_rph);
-                ompi_mtl_ofi.hosted_src_in_cqd_tag = 0;
-                ompi_mtl_ofi.hosted_cqd_src_bits = 0;
-                ompi_mtl_ofi.hosted_cqd_cid_bits = ofi_tag_bits_for_cid;
-            } else {
-                int cid_bits = n_usable - need_src;
-                if (cid_bits > 24) {
-                    cid_bits = 24;
+            /* Need 2*slot_bits (dest+src) + at least 1 cid bit. cxi has ~7
+             * usable upper bits: RPH<=8 fits (3+3+1); RPH=16 needs multi-EP. */
+            {
+                int need_slots = need_src * 2;
+                if (need_src < 1 || need_src > 8 || n_usable < need_slots + 1) {
+                    opal_output_verbose(
+                        1, opal_common_ofi.output,
+                        "%s:%d: Lithe hosted no-SEP: only %d usable upper tag "
+                        "bits (mem_tag_format=0x%016" PRIx64 "); need %d "
+                        "(dest+src) slot + cid for rph=%lu. Leaving CQD-only.\n",
+                        __FILE__, __LINE__, n_usable, (uint64_t) fmt, need_slots,
+                        lith_rph);
+                    ompi_mtl_ofi.hosted_dst_in_cqd_tag = 0;
+                    ompi_mtl_ofi.hosted_cqd_src_bits = 0;
+                    ompi_mtl_ofi.hosted_cqd_cid_bits = ofi_tag_bits_for_cid;
+                } else {
+                    int cid_bits = n_usable - need_slots;
+                    if (cid_bits > 24) {
+                        cid_bits = 24;
+                    }
+                    ompi_mtl_ofi.hosted_cqd_src_bits = need_src;
+                    ompi_mtl_ofi.hosted_cqd_cid_bits = cid_bits;
+                    for (i = 0; i < need_slots; ++i) {
+                        ompi_mtl_ofi.hosted_cqd_slot_bitpos[i] = usable[i];
+                    }
+                    for (i = 0; i < cid_bits; ++i) {
+                        ompi_mtl_ofi.hosted_cqd_cid_bitpos[i] =
+                            usable[need_slots + i];
+                    }
+                    ofi_tag_bits_for_cid = cid_bits;
+                    opal_output_verbose(
+                        1, opal_common_ofi.output,
+                        "%s:%d: Lithe hosted no-SEP: embed dest+src slots in "
+                        "CQD tag (usable_upper=%d cid_bits=%d slot_bits=%d "
+                        "dest_bitpos=[%u,%u] src_bitpos=[%u,%u] rph=%lu "
+                        "fmt=0x%016" PRIx64 ")\n",
+                        __FILE__, __LINE__, n_usable, cid_bits, need_src,
+                        (unsigned) ompi_mtl_ofi.hosted_cqd_slot_bitpos[0],
+                        need_src > 1
+                            ? (unsigned) ompi_mtl_ofi.hosted_cqd_slot_bitpos[1]
+                            : 0u,
+                        (unsigned) ompi_mtl_ofi.hosted_cqd_slot_bitpos[need_src],
+                        need_src > 1
+                            ? (unsigned) ompi_mtl_ofi
+                                  .hosted_cqd_slot_bitpos[need_src + 1]
+                            : 0u,
+                        lith_rph, (uint64_t) fmt);
                 }
-                ompi_mtl_ofi.hosted_cqd_src_bits = need_src;
-                ompi_mtl_ofi.hosted_cqd_cid_bits = cid_bits;
-                for (i = 0; i < need_src; ++i) {
-                    ompi_mtl_ofi.hosted_cqd_slot_bitpos[i] = usable[i];
-                }
-                for (i = 0; i < cid_bits; ++i) {
-                    ompi_mtl_ofi.hosted_cqd_cid_bitpos[i] = usable[need_src + i];
-                }
-                ofi_tag_bits_for_cid = cid_bits;
-                opal_output_verbose(
-                    1, opal_common_ofi.output,
-                    "%s:%d: Lithe hosted no-SEP: embed slot in CQD tag "
-                    "(usable_upper=%d cid_bits=%d slot_bits=%d "
-                    "slot_bitpos=[%u,%u] rph=%lu fmt=0x%016" PRIx64 ")\n",
-                    __FILE__, __LINE__, n_usable, cid_bits, need_src,
-                    (unsigned) ompi_mtl_ofi.hosted_cqd_slot_bitpos[0],
-                    need_src > 1 ? (unsigned) ompi_mtl_ofi.hosted_cqd_slot_bitpos[1]
-                                 : 0u,
-                    lith_rph, (uint64_t) fmt);
             }
         }
     }
@@ -1513,9 +1522,9 @@ select_prov:
         ompi_mtl_ofi.progress_block_enabled = true;
         {
             unsigned long lith_rph = opal_lithe_env_cache_rph();
-            /* Multi regular-EP is opt-in: LITHE_MTL_OFI_MULTI_EP=1. Default stays
-             * single-EP (+ sparse slot-in-tag) until multi-EP loopback is proven.
-             * Opt out remains MULTI_EP=0 when temporarily defaulted on. */
+            /* Multi regular-EP remains opt-in (LITHE_MTL_OFI_MULTI_EP=1).
+             * Site cxi loopback across same-process regular EPs still hangs
+             * at P1K2; dest+src slot-in-CQD-tag is the default demux path. */
             const char *multi_env = getenv("LITHE_MTL_OFI_MULTI_EP");
             int want_multi = (NULL != multi_env && multi_env[0] != '\0' &&
                               multi_env[0] != '0');
@@ -1533,7 +1542,7 @@ select_prov:
                  * Slot-in-tag is unnecessary once addresses differ — clear it. */
                 if (OMPI_SUCCESS == ret) {
                     ompi_mtl_ofi.progress_block_enabled = true;
-                    ompi_mtl_ofi.hosted_src_in_cqd_tag = 0;
+                    ompi_mtl_ofi.hosted_dst_in_cqd_tag = 0;
                     ompi_mtl_ofi.hosted_cqd_src_bits = 0;
                 }
             } else {

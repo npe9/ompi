@@ -1146,14 +1146,24 @@ ompi_mtl_ofi_ssend_recv(ompi_mtl_ofi_request_t *ack_req,
 
     ofi_req->completion_count += 1;
 
-    MTL_OFI_RETRY_UNTIL_DONE_CTXT(fi_trecv(ompi_mtl_ofi.ofi_ctxt[ctxt_id].rx_ep,
-                                      NULL,
-                                      0,
-                                      NULL,
-                                      *src_addr,
-                                      *match_bits | ompi_mtl_ofi.sync_send_ack,
-                                      0, /* Exact match, no ignore bits */
-                                      (void *) &ack_req->ctx), ret, ctxt_id);
+    {
+        fi_addr_t ack_src = *src_addr;
+#if HAVE_LITHE
+        /* Hosted dest-slot demux: directed source addrs are ambiguous on a
+         * shared EP; match the ack by tag (original dest-slot + ack bit). */
+        if (ompi_mtl_ofi.hosted_dst_in_cqd_tag || ompi_mtl_ofi.hosted_multi_ep) {
+            ack_src = ompi_mtl_ofi.any_addr;
+        }
+#endif
+        MTL_OFI_RETRY_UNTIL_DONE_CTXT(fi_trecv(ompi_mtl_ofi.ofi_ctxt[ctxt_id].rx_ep,
+                                          NULL,
+                                          0,
+                                          NULL,
+                                          ack_src,
+                                          *match_bits | ompi_mtl_ofi.sync_send_ack,
+                                          0, /* Exact match, no ignore bits */
+                                          (void *) &ack_req->ctx), ret, ctxt_id);
+    }
     if (OPAL_UNLIKELY(0 > ret)) {
         opal_output_verbose(1, opal_common_ofi.output,
                             "%s:%d: fi_trecv failed: %s(%zd)",
@@ -1380,8 +1390,8 @@ ompi_mtl_ofi_send_generic(struct mca_mtl_base_module_t *mtl,
     }
 
     if (ofi_cq_data) {
-        match_bits = mtl_ofi_create_send_tag_CQD(c_index_for_tag, tag,
-                                                 ompi_mtl_ofi_comm_rank(comm));
+        /* Hosted no-SEP CQD: dest-slot in tag (see mtl_ofi_create_send_tag_CQD). */
+        match_bits = mtl_ofi_create_send_tag_CQD(c_index_for_tag, tag, dest);
         src_addr = sep_peer_fiaddr;
     } else {
         match_bits = mtl_ofi_create_send_tag(c_index_for_tag,
@@ -1624,8 +1634,8 @@ ompi_mtl_ofi_isend_generic(struct mca_mtl_base_module_t *mtl,
     }
 
     if (ofi_cq_data) {
-        match_bits = mtl_ofi_create_send_tag_CQD(c_index_for_tag, tag,
-                                                 ompi_mtl_ofi_comm_rank(comm));
+        /* Hosted no-SEP CQD: dest-slot in tag (see mtl_ofi_create_send_tag_CQD). */
+        match_bits = mtl_ofi_create_send_tag_CQD(c_index_for_tag, tag, dest);
     } else {
         match_bits = mtl_ofi_create_send_tag(c_index_for_tag,
                           ompi_mtl_ofi_comm_rank(comm), tag);
@@ -1862,10 +1872,11 @@ ompi_mtl_ofi_irecv_generic(struct mca_mtl_base_module_t *mtl,
         if (MPI_ANY_SOURCE != src) {
             ompi_proc = ompi_comm_peer_lookup(comm, src);
             endpoint = ompi_mtl_ofi_get_endpoint(mtl, ompi_proc);
-            /* Multi regular-EP: destination EP already selects the receiver.
-             * Same-process loopback often fails FI_DIRECTED_RECV source-addr
-             * match; use UNSPEC and rely on tag (+ CQ data for MPI_Status). */
-            if (!ompi_mtl_ofi.hosted_multi_ep) {
+            /* Multi regular-EP / hosted dest-slot demux: co-resident ranks
+             * share one EP address so directed-recv source fi_addrs are
+             * ambiguous. Use UNSPEC; match by dest-slot tag (+ CQ data). */
+            if (!ompi_mtl_ofi.hosted_multi_ep &&
+                !ompi_mtl_ofi.hosted_dst_in_cqd_tag) {
                 remote_addr = fi_rx_addr(endpoint->peer_fiaddr, ctxt_id,
                                          ompi_mtl_ofi.rx_ctx_bits);
             }
@@ -2145,7 +2156,8 @@ ompi_mtl_ofi_iprobe_generic(struct mca_mtl_base_module_t *mtl,
         if (MPI_ANY_SOURCE != src) {
             ompi_proc = ompi_comm_peer_lookup( comm, src );
             endpoint = ompi_mtl_ofi_get_endpoint(mtl, ompi_proc);
-            if (!ompi_mtl_ofi.hosted_multi_ep) {
+            if (!ompi_mtl_ofi.hosted_multi_ep &&
+                !ompi_mtl_ofi.hosted_dst_in_cqd_tag) {
                 remote_proc = fi_rx_addr(endpoint->peer_fiaddr, ctxt_id,
                                          ompi_mtl_ofi.rx_ctx_bits);
             }
@@ -2252,7 +2264,8 @@ ompi_mtl_ofi_improbe_generic(struct mca_mtl_base_module_t *mtl,
         if (MPI_ANY_SOURCE != src) {
             ompi_proc = ompi_comm_peer_lookup( comm, src );
             endpoint = ompi_mtl_ofi_get_endpoint(mtl, ompi_proc);
-            if (!ompi_mtl_ofi.hosted_multi_ep) {
+            if (!ompi_mtl_ofi.hosted_multi_ep &&
+                !ompi_mtl_ofi.hosted_dst_in_cqd_tag) {
                 remote_proc = fi_rx_addr(endpoint->peer_fiaddr, ctxt_id,
                                          ompi_mtl_ofi.rx_ctx_bits);
             }
