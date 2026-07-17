@@ -34,6 +34,8 @@
 #include "ompi/memchecker.h"
 #include "ompi/runtime/ompi_spc.h"
 #include "ompi/runtime/ompi_lithe_world_coll.h"
+#include "ompi/proc/proc.h"
+#include "ompi/mca/coll/base/coll_base_functions.h"
 
 #if OMPI_BUILD_MPI_PROFILING
 #if OPAL_HAVE_WEAK_SYMBOLS
@@ -122,9 +124,22 @@ int MPI_Allreduce(const void *sendbuf, void *recvbuf, int count,
 
     OBJ_RETAIN(op);
     ompi_lithe_world_coll_lock(comm);
-    err = comm->c_coll->coll_allreduce(sendbuf, recvbuf, count,
-                                      datatype, op, comm,
-                                      comm->c_coll->coll_allreduce_module);
+    /*
+     * Hosted Lithe ranks share one communicator/coll module. Tuned/basic
+     * paths that reuse per-comm request pools and cached trees are not
+     * reentrant across concurrent ranks — wrong Allreduce sums. Use the
+     * stack/malloc recursive-doubling base algorithm (Sendrecv only).
+     */
+    if (OPAL_UNLIKELY(ompi_rte_lithe_hosted_multicontext_active) &&
+        OMPI_COMM_IS_INTRA(comm)) {
+        err = ompi_coll_base_allreduce_intra_recursivedoubling(
+            sendbuf, recvbuf, count, datatype, op, comm,
+            comm->c_coll->coll_allreduce_module);
+    } else {
+        err = comm->c_coll->coll_allreduce(sendbuf, recvbuf, count,
+                                          datatype, op, comm,
+                                          comm->c_coll->coll_allreduce_module);
+    }
     ompi_lithe_world_coll_unlock(comm);
     OBJ_RELEASE(op);
     OMPI_ERRHANDLER_RETURN(err, comm, err, FUNC_NAME);
