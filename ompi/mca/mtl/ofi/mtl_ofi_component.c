@@ -22,6 +22,7 @@
 #include "opal/mca/common/ofi/common_ofi.h"
 #include "opal/util/proc.h"
 
+#include <inttypes.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -848,6 +849,13 @@ ompi_mtl_ofi_component_init(bool enable_progress_threads,
                         __FILE__, __LINE__, *opal_common_ofi.prov_exclude);
 #if HAVE_LITHE
     ompi_mtl_ofi.hosted_multi_ep = 0;
+    ompi_mtl_ofi.hosted_src_in_cqd_tag = 0;
+    ompi_mtl_ofi.hosted_cqd_src_bits = 0;
+    ompi_mtl_ofi.hosted_cqd_cid_bits = 0;
+    memset(ompi_mtl_ofi.hosted_cqd_slot_bitpos, 0,
+           sizeof(ompi_mtl_ofi.hosted_cqd_slot_bitpos));
+    memset(ompi_mtl_ofi.hosted_cqd_cid_bitpos, 0,
+           sizeof(ompi_mtl_ofi.hosted_cqd_cid_bitpos));
 #endif
 
     if (NULL != *opal_common_ofi.prov_include) {
@@ -1103,9 +1111,35 @@ select_prov:
         (MTL_OFI_TAG_FULL == ofi_tag_mode)) {
             if (prov->domain_attr->cq_data_size >= sizeof(int) &&
                 (prov->caps & FI_DIRECTED_RECV)) {
-                /* Use FI_REMOTE_CQ_DATA */
+                /* Use FI_REMOTE_CQ_DATA (FULL tag layout — required for cxi
+                 * mem_tag_format; ofi_tag_1 does not fit). */
                 ompi_mtl_ofi.fi_cq_data = true;
                 ompi_mtl_ofi_define_tag_mode(MTL_OFI_TAG_FULL, &ofi_tag_bits_for_cid);
+#if HAVE_LITHE
+                /*
+                 * Hosted ranks (RPH>=2) on providers without SEP share one
+                 * regular EP address, so FI_DIRECTED_RECV cannot isolate
+                 * co-resident sources (Allreduce wrong sums). Keep CQD/FULL
+                 * bit layout for the provider, but embed co-resident slot
+                 * (rank%RPH) in the match tag (see mtl_ofi_create_*_tag_CQD).
+                 */
+                {
+                    int sep_ok = (prov->domain_attr->max_ep_tx_ctx > 1) ||
+                                 (prov->domain_attr->max_ep_rx_ctx > 1);
+                    unsigned long lith_rph = opal_lithe_env_cache_rph();
+                    if (!sep_ok && lith_rph >= 2UL) {
+                        /* Flag only here; shrink cid after mem_tag_format so
+                         * the provider high-bit check still uses FULL width. */
+                        ompi_mtl_ofi.hosted_src_in_cqd_tag = 1;
+                        opal_output_verbose(
+                            1, opal_common_ofi.output,
+                            "%s:%d: Lithe hosted no-SEP: will embed slot in CQD "
+                            "tag; provider=%s rph=%lu\n",
+                            __FILE__, __LINE__, prov->fabric_attr->prov_name,
+                            lith_rph);
+                    }
+                }
+#endif
             } else {
                 /* No support for FI_REMTOTE_CQ_DATA */
                 ompi_mtl_ofi.fi_cq_data = false;
@@ -1169,6 +1203,82 @@ select_prov:
                        ompi_process_info.nodename, __FILE__, __LINE__);
         goto error;
     }
+
+#if HAVE_LITHE
+    /*
+     * After provider bit reservation: carve co-resident *slot* bits
+     * (ceil(log2(RPH))) from provider-*usable* upper tag bits only.
+     * Contiguous <<34 packing is wrong on cxi (mem_tag_format
+     * 0x0000aaaaaaaaaaaa — odd bits only); low slot bits land on ignored
+     * even positions and collapse slots. Cross-node peers still differ by
+     * FI_DIRECTED_RECV addresses.
+     */
+    if (ompi_mtl_ofi.hosted_src_in_cqd_tag) {
+        unsigned long lith_rph = opal_lithe_env_cache_rph();
+        int need_src = 0;
+        unsigned long r;
+        uint64_t fmt = prov->ep_attr->mem_tag_format;
+        uint8_t usable[32];
+        int n_usable = 0;
+        int b, i;
+
+        if (lith_rph < 2UL) {
+            ompi_mtl_ofi.hosted_src_in_cqd_tag = 0;
+        } else {
+            r = lith_rph;
+            while ((1UL << need_src) < r) {
+                need_src++;
+            }
+            /* Upper field starts at PROTO_TAG_SHIFT (tag32+proto2). */
+            for (b = MTL_OFI_HOSTED_CQD_PROTO_TAG_SHIFT; b < 64; ++b) {
+                if (fmt & (1ULL << b)) {
+                    if (n_usable < (int) sizeof(usable)) {
+                        usable[n_usable++] = (uint8_t) b;
+                    }
+                }
+            }
+            /* Need slot bits + at least 1 cid bit (WORLD uses cid 0). Do not
+             * require MTL_OFI_MINIMUM_CID_BITS — cxi only has ~7 usable upper
+             * bits total. */
+            if (need_src < 1 || need_src > 8 || n_usable < need_src + 1) {
+                opal_output_verbose(
+                    1, opal_common_ofi.output,
+                    "%s:%d: Lithe hosted no-SEP: only %d usable upper tag bits "
+                    "(mem_tag_format=0x%016" PRIx64 "); need %d slot + cid for "
+                    "rph=%lu. Leaving CQD-only.\n",
+                    __FILE__, __LINE__, n_usable, (uint64_t) fmt, need_src,
+                    lith_rph);
+                ompi_mtl_ofi.hosted_src_in_cqd_tag = 0;
+                ompi_mtl_ofi.hosted_cqd_src_bits = 0;
+                ompi_mtl_ofi.hosted_cqd_cid_bits = ofi_tag_bits_for_cid;
+            } else {
+                int cid_bits = n_usable - need_src;
+                if (cid_bits > 24) {
+                    cid_bits = 24;
+                }
+                ompi_mtl_ofi.hosted_cqd_src_bits = need_src;
+                ompi_mtl_ofi.hosted_cqd_cid_bits = cid_bits;
+                for (i = 0; i < need_src; ++i) {
+                    ompi_mtl_ofi.hosted_cqd_slot_bitpos[i] = usable[i];
+                }
+                for (i = 0; i < cid_bits; ++i) {
+                    ompi_mtl_ofi.hosted_cqd_cid_bitpos[i] = usable[need_src + i];
+                }
+                ofi_tag_bits_for_cid = cid_bits;
+                opal_output_verbose(
+                    1, opal_common_ofi.output,
+                    "%s:%d: Lithe hosted no-SEP: embed slot in CQD tag "
+                    "(usable_upper=%d cid_bits=%d slot_bits=%d "
+                    "slot_bitpos=[%u,%u] rph=%lu fmt=0x%016" PRIx64 ")\n",
+                    __FILE__, __LINE__, n_usable, cid_bits, need_src,
+                    (unsigned) ompi_mtl_ofi.hosted_cqd_slot_bitpos[0],
+                    need_src > 1 ? (unsigned) ompi_mtl_ofi.hosted_cqd_slot_bitpos[1]
+                                 : 0u,
+                    lith_rph, (uint64_t) fmt);
+            }
+        }
+    }
+#endif
 
     /* Update the maximum supported Communicator ID */
     ompi_mtl_ofi.base.mtl_max_contextid = (int)((1ULL << ofi_tag_bits_for_cid) - 1);
@@ -1404,8 +1514,8 @@ select_prov:
         {
             unsigned long lith_rph = opal_lithe_env_cache_rph();
             /* Multi regular-EP is opt-in: LITHE_MTL_OFI_MULTI_EP=1. Default stays
-             * single-EP + serialized fi_t* posts (see MTL_OFI_RETRY_UNTIL_DONE_CTXT)
-             * until multi-EP loopback/progress is proven on cxi. */
+             * single-EP (+ sparse slot-in-tag) until multi-EP loopback is proven.
+             * Opt out remains MULTI_EP=0 when temporarily defaulted on. */
             const char *multi_env = getenv("LITHE_MTL_OFI_MULTI_EP");
             int want_multi = (NULL != multi_env && multi_env[0] != '\0' &&
                               multi_env[0] != '0');
@@ -1416,10 +1526,15 @@ select_prov:
                     want = (int) ep_cnt;
                 }
                 ret = ompi_mtl_ofi_init_multi_regular_ep(prov, universe_size, want);
-                /* Multi-EP: avoid blocking on a single CQ wait_fd while
-                 * co-resident ranks need peer CQ drain (lost-wakeup hang). */
+                /* Multi-EP: each slot has its own CQ wait_fd. Keep
+                 * progress_block enabled so wait_sync parks on the *local*
+                 * CQ fd (peer completions wake the peer context). Previously
+                 * disabling block caused busy-spin / hart starvation hangs.
+                 * Slot-in-tag is unnecessary once addresses differ — clear it. */
                 if (OMPI_SUCCESS == ret) {
-                    ompi_mtl_ofi.progress_block_enabled = false;
+                    ompi_mtl_ofi.progress_block_enabled = true;
+                    ompi_mtl_ofi.hosted_src_in_cqd_tag = 0;
+                    ompi_mtl_ofi.hosted_cqd_src_bits = 0;
                 }
             } else {
                 ompi_mtl_ofi.hosted_multi_ep = 0;

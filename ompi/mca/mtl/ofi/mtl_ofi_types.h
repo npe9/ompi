@@ -14,6 +14,8 @@
 #ifndef MTL_OFI_TYPES_H_HAS_BEEN_INCLUDED
 #define MTL_OFI_TYPES_H_HAS_BEEN_INCLUDED
 
+#include <stdint.h>
+
 #include "mtl_ofi.h"
 
 BEGIN_C_DECLS
@@ -108,6 +110,22 @@ typedef struct mca_mtl_ofi_module_t {
     /* Hosted RPH>=2 on providers without SEP (e.g. cxi max_ep_*_ctx=1):
      * one regular EP+CQ per logical slot instead of a single shared EP. */
     int hosted_multi_ep;
+    /*
+     * Hosted RPH>=2 + no SEP + FI_REMOTE_CQ_DATA: embed co-resident slot
+     * (rank % RPH) in the CQD match tag. Directed-recv cannot distinguish
+     * co-resident ranks that share one regular EP address. Cross-node peers
+     * still differ by EP address.
+     *
+     * Bits are placed only where provider mem_tag_format is 1. cxi uses
+     * 0x0000aaaaaaaaaaaa (odd bits only) — contiguous <<34 packing puts the
+     * low slot bit on an ignored even bit and collapses slots 0↔1, 2↔3.
+     */
+    int hosted_src_in_cqd_tag;
+    int hosted_cqd_src_bits;   /* ceil(log2(RPH)), clipped to usable budget */
+    int hosted_cqd_cid_bits;   /* remaining usable upper bits for cid */
+    /* Ascending bit positions (0..63) for slot then cid in the match tag. */
+    uint8_t hosted_cqd_slot_bitpos[8];
+    uint8_t hosted_cqd_cid_bitpos[24];
 #endif
 
 } mca_mtl_ofi_module_t;
@@ -159,11 +177,79 @@ typedef enum {
 #define MTL_OFI_SYNC_SEND_DATA          (0x0000000100000000ULL)
 #define MTL_OFI_SYNC_SEND_ACK_DATA      (0x0000000200000000ULL)
 
+/* Bits below this are MPI tag (32) + proto (2) in the FULL/CQD layout. */
+#define MTL_OFI_HOSTED_CQD_PROTO_TAG_SHIFT \
+    (MTL_OFI_TAG_BIT_COUNT_DATA + MTL_OFI_PROTO_BIT_COUNT)
+
+#if HAVE_LITHE
+/* Co-resident slot for hosted no-SEP CQD match isolation (rank % RPH). */
+__opal_attribute_always_inline__ static inline uint64_t
+mtl_ofi_hosted_cqd_slot(int source)
+{
+    unsigned long rph = opal_lithe_env_cache_rph();
+    if (rph < 2UL || source < 0) {
+        return (uint64_t) (unsigned) source;
+    }
+    return (uint64_t) ((unsigned) source % (unsigned) rph);
+}
+
+/* Pack cid+slot into provider-usable bit positions (sparse mem_tag_format). */
+__opal_attribute_always_inline__ static inline uint64_t
+mtl_ofi_hosted_cqd_pack_upper(uint64_t cid, uint64_t slot)
+{
+    uint64_t bits = 0;
+    int i;
+    int src_bits = ompi_mtl_ofi.hosted_cqd_src_bits;
+    int cid_bits = ompi_mtl_ofi.hosted_cqd_cid_bits;
+
+    for (i = 0; i < src_bits; ++i) {
+        if (slot & (1ULL << i)) {
+            bits |= (1ULL << ompi_mtl_ofi.hosted_cqd_slot_bitpos[i]);
+        }
+    }
+    for (i = 0; i < cid_bits; ++i) {
+        if (cid & (1ULL << i)) {
+            bits |= (1ULL << ompi_mtl_ofi.hosted_cqd_cid_bitpos[i]);
+        }
+    }
+    return bits;
+}
+
+__opal_attribute_always_inline__ static inline uint64_t
+mtl_ofi_hosted_cqd_slot_mask(void)
+{
+    uint64_t mask = 0;
+    int i;
+    for (i = 0; i < ompi_mtl_ofi.hosted_cqd_src_bits; ++i) {
+        mask |= (1ULL << ompi_mtl_ofi.hosted_cqd_slot_bitpos[i]);
+    }
+    return mask;
+}
+#endif
+
 /* Send tag with CQ_DATA */
 __opal_attribute_always_inline__ static inline uint64_t
-mtl_ofi_create_send_tag_CQD(int comm_id, int tag)
+mtl_ofi_create_send_tag_CQD(int comm_id, int tag, int source)
 {
-    uint64_t  match_bits = comm_id;
+    uint64_t  match_bits = (uint64_t) comm_id;
+#if HAVE_LITHE
+    if (ompi_mtl_ofi.hosted_src_in_cqd_tag &&
+        ompi_mtl_ofi.hosted_cqd_src_bits > 0) {
+        int cid_bits = ompi_mtl_ofi.hosted_cqd_cid_bits;
+        uint64_t cid_mask = (cid_bits >= 63) ? ~0ULL : ((1ULL << cid_bits) - 1ULL);
+        uint64_t src_mask =
+            (ompi_mtl_ofi.hosted_cqd_src_bits >= 63)
+                ? ~0ULL
+                : ((1ULL << ompi_mtl_ofi.hosted_cqd_src_bits) - 1ULL);
+        uint64_t slot = mtl_ofi_hosted_cqd_slot(source) & src_mask;
+        uint64_t cid = (uint64_t) comm_id & cid_mask;
+        match_bits = mtl_ofi_hosted_cqd_pack_upper(cid, slot);
+        match_bits |= (tag & MTL_OFI_TAG_MASK_DATA);
+        return match_bits;
+    }
+#else
+    (void) source;
+#endif
     match_bits = (match_bits << (MTL_OFI_TAG_BIT_COUNT_DATA
                                 + MTL_OFI_PROTO_BIT_COUNT));
     match_bits |= (tag & MTL_OFI_TAG_MASK_DATA);
@@ -173,10 +259,39 @@ mtl_ofi_create_send_tag_CQD(int comm_id, int tag)
 /* Receive tag with CQ_DATA */
 __opal_attribute_always_inline__ static inline void
 mtl_ofi_create_recv_tag_CQD(uint64_t *match_bits, uint64_t *mask_bits,
-                            int comm_id, int tag)
+                            int comm_id, int tag, int source)
 {
     *mask_bits  = ompi_mtl_ofi.sync_send;
     *match_bits = (uint64_t) comm_id;
+#if HAVE_LITHE
+    if (ompi_mtl_ofi.hosted_src_in_cqd_tag &&
+        ompi_mtl_ofi.hosted_cqd_src_bits > 0) {
+        int cid_bits = ompi_mtl_ofi.hosted_cqd_cid_bits;
+        uint64_t cid_mask = (cid_bits >= 63) ? ~0ULL : ((1ULL << cid_bits) - 1ULL);
+        uint64_t src_mask =
+            (ompi_mtl_ofi.hosted_cqd_src_bits >= 63)
+                ? ~0ULL
+                : ((1ULL << ompi_mtl_ofi.hosted_cqd_src_bits) - 1ULL);
+        uint64_t cid = (uint64_t) comm_id & cid_mask;
+        uint64_t slot = 0;
+
+        if (MPI_ANY_SOURCE == source) {
+            *match_bits = mtl_ofi_hosted_cqd_pack_upper(cid, 0);
+            *mask_bits |= mtl_ofi_hosted_cqd_slot_mask();
+        } else {
+            slot = mtl_ofi_hosted_cqd_slot(source) & src_mask;
+            *match_bits = mtl_ofi_hosted_cqd_pack_upper(cid, slot);
+        }
+        if (MPI_ANY_TAG == tag) {
+            *mask_bits |= (ompi_mtl_ofi.mpi_tag_mask >> 1);
+        } else {
+            *match_bits |= (ompi_mtl_ofi.mpi_tag_mask & tag);
+        }
+        return;
+    }
+#else
+    (void) source;
+#endif
     *match_bits = (*match_bits << (MTL_OFI_PROTO_BIT_COUNT
                                 +  MTL_OFI_TAG_BIT_COUNT_DATA));
     if (MPI_ANY_TAG == tag) {

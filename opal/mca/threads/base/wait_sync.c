@@ -18,6 +18,11 @@
 
 #include "opal/mca/threads/wait_sync.h"
 
+#if HAVE_LITHE
+#include <lithe/fork_join_sched.h>
+#include <lithe/lithe.h>
+#endif
+
 static opal_mutex_t wait_sync_lock = OPAL_MUTEX_STATIC_INIT;
 ompi_wait_sync_t *opal_threads_base_wait_sync_list = NULL; /* not static for inline "wait_sync_st" */
 
@@ -118,7 +123,29 @@ check_status:
     OPAL_THREAD_ADD_FETCH32(&num_thread_in_progress, 1);
     while (sync->count > 0) { /* progress till completion */
         /* don't progress with the sync lock locked or you'll deadlock */
-        opal_progress();
+        int events = opal_progress();
+#if HAVE_LITHE
+        /*
+         * MPI_THREAD_MULTIPLE / hosted ranks: the progress-manager uthread
+         * used to busy-spin opal_progress() with no yield. That hoards the
+         * vcore while co-resident Lithe contexts sit RUNNABLE (e.g. peer
+         * hosted ranks that must post/complete for same-process Allreduce)
+         * — classic hart-starvation. Mirror libomp's inner-barrier cure:
+         * if peers are waiting for a hart, donate via lithe_context_yield;
+         * else park on OFI CQ readiness (opal_progress_block) instead of
+         * burning the core.
+         */
+        if (sync->count > 0 && events <= 0) {
+            /* Yield only under hart scarcity; else park (no yield-storm). */
+            if (lithe_fork_join_should_yield_to_runnable()) {
+                lithe_context_yield();
+            } else {
+                opal_progress_block();
+            }
+        }
+#else
+        (void) events;
+#endif
     }
     OPAL_THREAD_ADD_FETCH32(&num_thread_in_progress, -1);
 

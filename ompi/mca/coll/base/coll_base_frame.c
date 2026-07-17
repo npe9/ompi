@@ -35,6 +35,14 @@
 #include "ompi/mca/coll/coll.h"
 #include "ompi/mca/coll/base/base.h"
 #include "ompi/mca/coll/base/coll_base_functions.h"
+#include "ompi/proc/proc.h"
+
+#if defined(__has_include)
+#    if __has_include(<parlib/dtls.h>)
+#        include <parlib/dtls.h>
+#        define OMPI_COLL_HAVE_PARLIB_DTLS 1
+#    endif
+#endif
 
 /*
  * The following file was created by configure.  It contains extern
@@ -42,6 +50,41 @@
  * component's public mca_base_component_t struct.
  */
 #include "ompi/mca/coll/base/static-components.h"
+
+#if OMPI_COLL_HAVE_PARLIB_DTLS
+/*
+ * Hosted Lithe ranks share one communicator / coll module but run concurrent
+ * collectives. The shared mcct_reqs pool races (wrong Allreduce sums). Keep a
+ * private req array per Lithe context (parlib DTLS).
+ */
+typedef struct {
+    ompi_request_t **reqs;
+    int num_reqs;
+} ompi_coll_lithe_reqs_t;
+
+static dtls_key_t ompi_coll_lithe_reqs_dtls_key;
+static volatile int ompi_coll_lithe_reqs_dtls_ready = 0;
+
+static void ompi_coll_lithe_reqs_dtor(void *value)
+{
+    ompi_coll_lithe_reqs_t *slot = (ompi_coll_lithe_reqs_t *) value;
+    if (NULL == slot) {
+        return;
+    }
+    free(slot->reqs);
+    free(slot);
+}
+
+static void ompi_coll_lithe_reqs_dtls_init(void)
+{
+    if (ompi_coll_lithe_reqs_dtls_ready) {
+        return;
+    }
+    ompi_coll_lithe_reqs_dtls_key = dtls_key_create(ompi_coll_lithe_reqs_dtor);
+    ompi_coll_lithe_reqs_dtls_ready =
+        (NULL == ompi_coll_lithe_reqs_dtls_key) ? -1 : 1;
+}
+#endif /* OMPI_COLL_HAVE_PARLIB_DTLS */
 
 /*
  * Ensure all function pointers are NULL'ed out to start with
@@ -116,6 +159,38 @@ OBJ_CLASS_INSTANCE(mca_coll_base_comm_t, opal_object_t,
 ompi_request_t** ompi_coll_base_comm_get_reqs(mca_coll_base_comm_t* data, int nreqs)
 {
     if( 0 == nreqs ) return NULL;
+
+#if OMPI_COLL_HAVE_PARLIB_DTLS
+    if (ompi_rte_lithe_hosted_multicontext_active) {
+        ompi_coll_lithe_reqs_t *slot;
+
+        ompi_coll_lithe_reqs_dtls_init();
+        if (ompi_coll_lithe_reqs_dtls_ready > 0) {
+            slot = (ompi_coll_lithe_reqs_t *) get_dtls(ompi_coll_lithe_reqs_dtls_key);
+            if (NULL == slot) {
+                slot = (ompi_coll_lithe_reqs_t *) calloc(1, sizeof(*slot));
+                if (NULL == slot) {
+                    return NULL;
+                }
+                set_dtls(ompi_coll_lithe_reqs_dtls_key, slot);
+            }
+            if (slot->num_reqs < nreqs) {
+                ompi_request_t **nr =
+                    (ompi_request_t **) realloc(slot->reqs,
+                                                sizeof(ompi_request_t *) * (size_t) nreqs);
+                if (NULL == nr) {
+                    return NULL;
+                }
+                for (int i = slot->num_reqs; i < nreqs; i++) {
+                    nr[i] = MPI_REQUEST_NULL;
+                }
+                slot->reqs = nr;
+                slot->num_reqs = nreqs;
+            }
+            return slot->reqs;
+        }
+    }
+#endif /* OMPI_COLL_HAVE_PARLIB_DTLS */
 
     if( data->mcct_num_reqs < nreqs ) {
         data->mcct_reqs = (ompi_request_t**)realloc(data->mcct_reqs, sizeof(ompi_request_t*) * nreqs);

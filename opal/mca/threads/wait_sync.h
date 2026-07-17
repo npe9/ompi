@@ -35,6 +35,11 @@
 #include "opal/runtime/opal_progress.h"
 #include "opal/sys/atomic.h"
 
+#if HAVE_LITHE
+#include <lithe/fork_join_sched.h>
+#include <lithe/lithe.h>
+#endif
+
 BEGIN_C_DECLS
 
 extern int opal_max_thread_in_progress;
@@ -104,7 +109,12 @@ static inline int sync_wait_st(ompi_wait_sync_t *sync)
         int events = opal_progress();
 #if HAVE_LITHE
         if (sync->count > 0 && events <= 0) {
-            opal_progress_block();
+            /* Yield only when harts are scarce; else CQ-park (no yield-storm). */
+            if (lithe_fork_join_should_yield_to_runnable()) {
+                lithe_context_yield();
+            } else {
+                opal_progress_block();
+            }
         }
 #endif
     }
