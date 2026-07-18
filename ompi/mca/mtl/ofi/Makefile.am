@@ -48,6 +48,8 @@ mtl_ofi_sources = \
     mtl_ofi_component.c \
     mtl_ofi_endpoint.h \
     mtl_ofi_endpoint.c \
+    mtl_ofi_hosted_sc.h \
+    mtl_ofi_hosted_sc.c \
     mtl_ofi_request.h \
     mtl_ofi_types.h \
     mtl_ofi_opt.h \

@@ -62,6 +62,7 @@
 #include <stdlib.h>
 
 #include "opal/mca/threads/mutex.h"
+#include "mtl_ofi_hosted_sc.h"
 #endif
 
 BEGIN_C_DECLS
@@ -1477,6 +1478,16 @@ ompi_mtl_ofi_send_generic(struct mca_mtl_base_module_t *mtl,
         return OMPI_ERROR;
     }
 
+#if HAVE_LITHE
+    /* Same-OS hosted ranks: memcpy match, skip cxi/OFI loopback. */
+    if (!(convertor->flags & CONVERTOR_ACCELERATOR)
+        && ompi_mtl_ofi_hosted_sc_enabled()
+        && ompi_mtl_ofi_hosted_sc_try_send(comm, dest, tag, start, length,
+                                           free_after, mode, &ofi_req, false)) {
+        return ofi_req.status.MPI_ERROR;
+    }
+#endif
+
     if (ofi_cq_data) {
         /* Hosted no-SEP CQD: dest-slot in tag (see mtl_ofi_create_send_tag_CQD). */
         match_bits = mtl_ofi_create_send_tag_CQD(c_index_for_tag, tag, dest);
@@ -1721,6 +1732,15 @@ ompi_mtl_ofi_isend_generic(struct mca_mtl_base_module_t *mtl,
         return OMPI_ERROR;
     }
 
+#if HAVE_LITHE
+    if (!(convertor->flags & CONVERTOR_ACCELERATOR)
+        && ompi_mtl_ofi_hosted_sc_enabled()
+        && ompi_mtl_ofi_hosted_sc_try_send(comm, dest, tag, start, length,
+                                           free_after, mode, ofi_req, true)) {
+        return ofi_req->status.MPI_ERROR;
+    }
+#endif
+
     if (ofi_cq_data) {
         /* Hosted no-SEP CQD: dest-slot in tag (see mtl_ofi_create_send_tag_CQD). */
         match_bits = mtl_ofi_create_send_tag_CQD(c_index_for_tag, tag, dest);
@@ -1829,6 +1849,17 @@ ompi_mtl_ofi_recv_callback(struct fi_cq_tagged_entry *wc,
 
     assert(ofi_req->super.ompi_req);
     status = &ofi_req->super.ompi_req->req_status;
+
+#if HAVE_LITHE
+    /* Dual-posted ANY_SOURCE: OFI won the race — drop SC posted entry. */
+    if (ompi_mtl_ofi_hosted_sc_enabled()) {
+        if (ofi_req->req_started) {
+            /* SC already completed this request; ignore late CQ event. */
+            return OMPI_SUCCESS;
+        }
+        ompi_mtl_ofi_hosted_sc_ofi_recv_claimed(ofi_req);
+    }
+#endif
 
     /**
      * Any event associated with a request starts it.
@@ -2003,6 +2034,23 @@ ompi_mtl_ofi_irecv_generic(struct mca_mtl_base_module_t *mtl,
         return ompi_ret;
     }
 
+#if HAVE_LITHE
+    if (!(convertor->flags & CONVERTOR_ACCELERATOR)
+        && ompi_mtl_ofi_hosted_sc_enabled()) {
+        int sc = ompi_mtl_ofi_hosted_sc_try_irecv(comm, src, tag, start, length,
+                                                  ofi_req);
+        if (1 == sc) {
+            /* Fully handled (matched UE or posted local-only). */
+            return OMPI_SUCCESS;
+        }
+        /* sc==2: ANY_SOURCE dual-post — also fi_trecv below. sc==0: OFI only. */
+        if (2 == sc && ofi_req->req_started) {
+            /* Matched via SC before we could post fi_trecv. */
+            return OMPI_SUCCESS;
+        }
+    }
+#endif
+
     MTL_OFI_RETRY_UNTIL_DONE_CTXT(fi_trecv(ompi_mtl_ofi.ofi_ctxt[ctxt_id].rx_ep,
                                       start,
                                       length,
@@ -2017,6 +2065,17 @@ ompi_mtl_ofi_irecv_generic(struct mca_mtl_base_module_t *mtl,
         MTL_OFI_LOG_FI_ERR(ret, "fi_trecv failed");
         return ompi_mtl_ofi_get_error(ret);
     }
+
+#if HAVE_LITHE
+    if (ompi_mtl_ofi_hosted_sc_enabled()) {
+        ompi_mtl_ofi_hosted_sc_mark_ofi_posted(ofi_req);
+        if (ofi_req->req_started) {
+            /* SC matched during/after fi_trecv — cancel the OFI post. */
+            (void) fi_cancel((fid_t) ompi_mtl_ofi.ofi_ctxt[ctxt_id].rx_ep,
+                             &ofi_req->ctx);
+        }
+    }
+#endif
 
     return OMPI_SUCCESS;
 }
@@ -2448,6 +2507,12 @@ ompi_mtl_ofi_cancel(struct mca_mtl_base_module_t *mtl,
              * The event queue needs to be drained to make sure there isn't
              * any pending receive completion event.
              */
+#if HAVE_LITHE
+            if (ompi_mtl_ofi_hosted_sc_enabled()
+                && ompi_mtl_ofi_hosted_sc_cancel_recv(ofi_req)) {
+                break;
+            }
+#endif
             ctxt_id = ompi_mtl_ofi_map_comm_to_ctxt(ofi_req->comm->c_index);
             ompi_mtl_ofi_progress_after_eagain(ctxt_id);
 

@@ -1708,6 +1708,7 @@ select_prov:
     ompi_mtl_ofi_prev_proc_local_hook = opal_proc_local_changed_hook;
     opal_proc_local_changed_hook = ompi_mtl_ofi_proc_local_changed_cb;
     ompi_mtl_ofi_proc_hook_installed = 1;
+    (void) ompi_mtl_ofi_hosted_sc_init();
 #endif
 
     return &ompi_mtl_ofi.base;
@@ -1770,6 +1771,7 @@ ompi_mtl_ofi_finalize(struct mca_mtl_base_module_t *mtl)
     opal_progress_unregister(ompi_mtl_ofi_progress_no_inline);
 #if HAVE_LITHE
     opal_progress_set_block_callback(NULL);
+    ompi_mtl_ofi_hosted_sc_finalize();
 #endif
 
 #if HAVE_LITHE
