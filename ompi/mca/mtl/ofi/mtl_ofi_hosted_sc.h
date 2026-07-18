@@ -64,6 +64,14 @@ void ompi_mtl_ofi_hosted_sc_ofi_recv_claimed(ompi_mtl_ofi_request_t *ofi_req);
 /* Cancel a recv that may be on the SC posted list. Returns 1 if cancelled. */
 int ompi_mtl_ofi_hosted_sc_cancel_recv(ompi_mtl_ofi_request_t *ofi_req);
 
+/*
+ * Single-OS SC wait helper for wait_sync scarce path. If this rank has a
+ * pending same-OS posted recv: cpu_relax spin (avoid yield→empty steal);
+ * after a long streak, park until matching enqueue unblocks. Returns 1 if
+ * handled (caller must not yield), 0 otherwise. Multi-OS returns 0.
+ */
+int ompi_mtl_ofi_hosted_sc_try_park_pending(void);
+
 END_C_DECLS
 
 #endif /* HAVE_LITHE */

@@ -136,9 +136,11 @@ check_status:
          * burning the core.
          */
         if (sync->count > 0 && events <= 0) {
-            /* Yield only under hart scarcity; else park (no yield-storm). */
+            /* Scarce: SC park (MTL callback) else yield; else CQ-park. */
             if (lithe_fork_join_should_yield_to_runnable()) {
-                lithe_context_yield();
+                if (0 == opal_progress_sc_park()) {
+                    lithe_context_yield();
+                }
             } else {
                 opal_progress_block();
             }

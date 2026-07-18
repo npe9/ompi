@@ -178,6 +178,10 @@ init_regular_ep:
             ompi_mtl_ofi.ofi_ctxt[ctxt_id].cq_wait_fd >= 0) {
             opal_progress_set_block_callback(ompi_mtl_ofi_progress_block_no_inline);
         }
+        /* Same-OS SC park for wait_sync scarce path (avoid yield→steal). */
+        if (ompi_mtl_ofi_hosted_sc_enabled()) {
+            opal_progress_set_sc_park_callback(ompi_mtl_ofi_hosted_sc_try_park_pending);
+        }
 #endif
     }
 

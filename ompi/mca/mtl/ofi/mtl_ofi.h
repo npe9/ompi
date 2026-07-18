@@ -703,7 +703,12 @@ ompi_mtl_ofi_progress_block(void)
         /* Spin with short blocking CQ drains (lock held only around fi_cq_read).
          * Pure trylock+infinite-park deadlocked co-resident ranks on shared
          * no-SEP CQ (both park, nobody drains). Prefer yield under scarcity
-         * over infinite park when RPH>=2. */
+         * over infinite park when RPH>=2.
+         *
+         * Single-OS + SC: when harts are scarce, park on the posted SC recv
+         * instead of yield→empty FJS steal (P1K4 residual). Keep the spin so a
+         * helper hart can finish the peer send before we block (early-park
+         * before spin_max regressed P1K4 to ~70µs). Multi-OS: unchanged. */
         count = mtl_ofi_mc_progress_once(ctxt_id, outer, 1, 1);
         if (count > 0) {
             ompi_mtl_ofi_litheme_mc_outer_progress_leave();
@@ -717,6 +722,12 @@ ompi_mtl_ofi_progress_block(void)
                 return count;
             }
             if (lithe_fork_join_should_yield_to_runnable()) {
+                if (ompi_mtl_ofi_hosted_sc_enabled()
+                    && ompi_mtl_ofi_hosted_sc_try_park_pending()) {
+                    count = mtl_ofi_mc_progress_once(ctxt_id, outer, 1, 1);
+                    ompi_mtl_ofi_litheme_mc_outer_progress_leave();
+                    return count;
+                }
                 lithe_context_yield();
                 continue;
             }
@@ -725,9 +736,10 @@ ompi_mtl_ofi_progress_block(void)
 
         /* Single-OS-process hosted (LITHE_MTL_OFI_SINGLE_OS=1 from launcher when
          * NTASKS==1): do not park on the CQ fd — shared no-SEP waiters race on
-         * edge wakeups, and park floors P1K2 Barrier+Allreduce. Yield if scarce,
-         * drain once more, return to wait_sync. Multi-OS: CQ park so remote
-         * completions can wake us (P2K2 needs this; no-park → ~800µs). */
+         * edge wakeups, and park floors P1K2 Barrier+Allreduce. SC park under
+         * scarcity (above); else yield if scarce, drain once more, return to
+         * wait_sync. Multi-OS: CQ park so remote completions can wake us
+         * (P2K2 needs this; no-park → ~800µs). */
         {
             static int single_os = -1;
             if (single_os < 0) {
@@ -736,6 +748,12 @@ ompi_mtl_ofi_progress_block(void)
             }
             if (single_os || wait_fd < 0) {
                 if (lithe_fork_join_should_yield_to_runnable()) {
+                    if (single_os && ompi_mtl_ofi_hosted_sc_enabled()
+                        && ompi_mtl_ofi_hosted_sc_try_park_pending()) {
+                        count = mtl_ofi_mc_progress_once(ctxt_id, outer, 1, 1);
+                        ompi_mtl_ofi_litheme_mc_outer_progress_leave();
+                        return count;
+                    }
                     lithe_context_yield();
                 }
                 count = mtl_ofi_mc_progress_once(ctxt_id, outer, 1, 1);

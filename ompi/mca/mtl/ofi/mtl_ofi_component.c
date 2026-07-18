@@ -1771,6 +1771,7 @@ ompi_mtl_ofi_finalize(struct mca_mtl_base_module_t *mtl)
     opal_progress_unregister(ompi_mtl_ofi_progress_no_inline);
 #if HAVE_LITHE
     opal_progress_set_block_callback(NULL);
+    opal_progress_set_sc_park_callback(NULL);
     ompi_mtl_ofi_hosted_sc_finalize();
 #endif
 

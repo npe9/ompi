@@ -64,6 +64,7 @@ static volatile opal_progress_callback_t *callbacks_lp = NULL;
 static size_t callbacks_lp_len = 0;
 static size_t callbacks_lp_size = 0;
 static opal_progress_block_callback_t block_callback = NULL;
+static opal_progress_sc_park_callback_t sc_park_callback = NULL;
 
 /* do we want to yield() if nothing happened */
 bool opal_progress_yield_when_idle = false;
@@ -271,6 +272,20 @@ int opal_progress_block(void)
     }
 
     opal_thread_yield();
+    return 0;
+}
+
+void opal_progress_set_sc_park_callback(opal_progress_sc_park_callback_t cb)
+{
+    sc_park_callback = cb;
+}
+
+int opal_progress_sc_park(void)
+{
+    opal_progress_sc_park_callback_t cb = sc_park_callback;
+    if (NULL != cb) {
+        return cb();
+    }
     return 0;
 }
 

@@ -20,6 +20,7 @@
 
 #include "opal/class/opal_list.h"
 #include "opal/mca/threads/mutex.h"
+#include "opal/runtime/opal_progress.h"
 #include "opal/util/output.h"
 #include "opal/util/proc.h"
 
@@ -36,6 +37,8 @@ typedef struct {
     int cid;
     int ofi_dual;       /* may also use fi_trecv (ANY_SOURCE) */
     int ofi_posted;     /* fi_trecv successfully posted (safe to cancel) */
+    /* Lithe context parked in try_park_pending for this posted recv. */
+    lithe_context_t *waiter;
 } ompi_mtl_ofi_hosted_sc_posted_t;
 
 OBJ_CLASS_INSTANCE(ompi_mtl_ofi_hosted_sc_posted_t, opal_list_item_t, NULL, NULL);
@@ -50,6 +53,8 @@ typedef struct {
     int is_sync;
     int send_is_isend;
     ompi_mtl_ofi_request_t *send_req;
+    /* Sync-send Lithe context parked until matching recv takes this UE. */
+    lithe_context_t *send_waiter;
 } ompi_mtl_ofi_hosted_sc_ue_t;
 
 OBJ_CLASS_INSTANCE(ompi_mtl_ofi_hosted_sc_ue_t, opal_list_item_t, NULL, NULL);
@@ -60,9 +65,80 @@ typedef struct {
     opal_list_t unexpected;
 } ompi_mtl_ofi_hosted_sc_slot_t;
 
+typedef struct {
+    ompi_mtl_ofi_hosted_sc_slot_t *slot;
+    int armed; /* 1 if at least one posted entry still pending */
+} sc_park_arg_t;
+
+typedef struct {
+    ompi_mtl_ofi_hosted_sc_slot_t *slot;
+    ompi_mtl_ofi_hosted_sc_ue_t *ue;
+    ompi_mtl_ofi_request_t *sreq;
+} sc_ssend_park_arg_t;
+
 static ompi_mtl_ofi_hosted_sc_slot_t *sc_slots = NULL;
 static unsigned long sc_nslots = 0;
 static int sc_enabled = 0;
+
+/*
+ * Clear waiter pointers matching w on this slot (lock held). Caller unlocks
+ * then unblocks — never unblock under the SC slot lock.
+ */
+static void sc_clear_waiter_locked(ompi_mtl_ofi_hosted_sc_slot_t *slot,
+                                   lithe_context_t *w)
+{
+    ompi_mtl_ofi_hosted_sc_posted_t *pr;
+    ompi_mtl_ofi_hosted_sc_ue_t *ue;
+
+    if (NULL == w) {
+        return;
+    }
+    OPAL_LIST_FOREACH (pr, &slot->posted, ompi_mtl_ofi_hosted_sc_posted_t) {
+        if (pr->waiter == w) {
+            pr->waiter = NULL;
+        }
+    }
+    OPAL_LIST_FOREACH (ue, &slot->unexpected, ompi_mtl_ofi_hosted_sc_ue_t) {
+        if (ue->send_waiter == w) {
+            ue->send_waiter = NULL;
+        }
+    }
+}
+
+static void sc_park_cb(lithe_context_t *context, void *arg)
+{
+    sc_park_arg_t *a = (sc_park_arg_t *) arg;
+    ompi_mtl_ofi_hosted_sc_posted_t *pr;
+    int pending = 0;
+
+    /* Lock held by try_park_pending across lithe_context_block entry. */
+    OPAL_LIST_FOREACH (pr, &a->slot->posted, ompi_mtl_ofi_hosted_sc_posted_t) {
+        if (pr->req->req_started) {
+            continue;
+        }
+        pr->waiter = context;
+        pending = 1;
+    }
+    a->armed = pending;
+    opal_mutex_unlock(&a->slot->lock);
+    if (!pending) {
+        /* Matched before arming — resume immediately (state is BLOCKED). */
+        lithe_context_unblock(context);
+    }
+}
+
+static void sc_ssend_park_cb(lithe_context_t *context, void *arg)
+{
+    sc_ssend_park_arg_t *a = (sc_ssend_park_arg_t *) arg;
+
+    if (NULL == a->sreq || a->sreq->completion_count <= 0) {
+        opal_mutex_unlock(&a->slot->lock);
+        lithe_context_unblock(context);
+        return;
+    }
+    a->ue->send_waiter = context;
+    opal_mutex_unlock(&a->slot->lock);
+}
 
 /* True when logical world spans more than one OS process (P>1). */
 static int sc_multi_os_world(void)
@@ -156,17 +232,21 @@ static void sc_finish_send(ompi_mtl_ofi_request_t *ofi_req, bool is_isend,
     }
 }
 
-static void sc_release_ssend(ompi_mtl_ofi_hosted_sc_ue_t *ue)
+static lithe_context_t *sc_release_ssend(ompi_mtl_ofi_hosted_sc_ue_t *ue)
 {
     ompi_mtl_ofi_request_t *sreq = ue->send_req;
+    lithe_context_t *w = ue->send_waiter;
+
+    ue->send_waiter = NULL;
     if (NULL == sreq) {
-        return;
+        return w;
     }
     if (ue->send_is_isend) {
         sc_finish_send(sreq, true, false, NULL);
     } else if (sreq->completion_count > 0) {
         sreq->completion_count--;
     }
+    return w;
 }
 
 int ompi_mtl_ofi_hosted_sc_enabled(void)
@@ -234,6 +314,8 @@ int ompi_mtl_ofi_hosted_sc_init(void)
         OBJ_CONSTRUCT(&sc_slots[i].unexpected, opal_list_t);
     }
     sc_enabled = 1;
+    /* wait_sync scarce path: park on posted recv instead of yield→steal. */
+    opal_progress_set_sc_park_callback(ompi_mtl_ofi_hosted_sc_try_park_pending);
     opal_output_verbose(1, opal_common_ofi.output,
                         "mtl:ofi: hosted same-OS short-circuit enabled (slots=%lu multi_os=%d)",
                         rph, sc_multi_os_world());
@@ -244,6 +326,7 @@ void ompi_mtl_ofi_hosted_sc_finalize(void)
 {
     unsigned long i;
 
+    opal_progress_set_sc_park_callback(NULL);
     if (NULL == sc_slots) {
         sc_enabled = 0;
         return;
@@ -290,6 +373,7 @@ int ompi_mtl_ofi_hosted_sc_try_send(struct ompi_communicator_t *comm, int dest,
     void *matched_dst = NULL;
     int need_ofi_cancel = 0;
     struct ompi_communicator_t *matched_comm = NULL;
+    lithe_context_t *recv_waiter = NULL;
 
     if (!sc_enabled) {
         return 0;
@@ -322,8 +406,11 @@ int ompi_mtl_ofi_hosted_sc_try_send(struct ompi_communicator_t *comm, int dest,
         matched_recv = pr->req;
         matched_dst = pr->buf;
         matched_comm = pr->req->comm;
+        recv_waiter = pr->waiter;
+        pr->waiter = NULL;
         /* Only cancel if fi_trecv was actually posted (not merely planned). */
         need_ofi_cancel = (pr->ofi_dual && pr->ofi_posted) ? 1 : 0;
+        sc_clear_waiter_locked(slot, recv_waiter);
         opal_list_remove_item(&slot->posted, &pr->super);
         OBJ_RELEASE(pr);
         break;
@@ -339,6 +426,10 @@ int ompi_mtl_ofi_hosted_sc_try_send(struct ompi_communicator_t *comm, int dest,
         }
         sc_finish_recv(matched_recv, matched_dst, src_rank, tag, start, length);
         sc_finish_send(ofi_req, is_isend, free_after, start);
+        /* Directed wake: peer parked in try_park_pending on empty SC queue. */
+        if (NULL != recv_waiter) {
+            lithe_context_unblock(recv_waiter);
+        }
         return 1;
     }
 
@@ -368,20 +459,31 @@ int ompi_mtl_ofi_hosted_sc_try_send(struct ompi_communicator_t *comm, int dest,
     ue->is_sync = is_sync;
     ue->send_is_isend = is_isend ? 1 : 0;
     ue->send_req = NULL;
+    ue->send_waiter = NULL;
 
     if (is_sync) {
+        sc_ssend_park_arg_t parg;
+
         ofi_req->completion_count = 1;
         ofi_req->status.MPI_ERROR = OMPI_SUCCESS;
         ue->send_req = ofi_req;
         opal_list_append(&slot->unexpected, &ue->super);
-        opal_mutex_unlock(&slot->lock);
         if (!is_isend) {
+            /* Park until matching recv takes UE — not yield→empty steal. */
             while (ofi_req->completion_count > 0) {
-                lithe_context_yield();
+                parg.slot = slot;
+                parg.ue = ue;
+                parg.sreq = ofi_req;
+                lithe_context_block(sc_ssend_park_cb, &parg);
+                /* Relock for next completion_count check / re-park. */
+                opal_mutex_lock(&slot->lock);
             }
+            opal_mutex_unlock(&slot->lock);
             if (free_after && NULL != start) {
                 free(start);
             }
+        } else {
+            opal_mutex_unlock(&slot->lock);
         }
         return 1;
     }
@@ -432,16 +534,21 @@ int ompi_mtl_ofi_hosted_sc_try_irecv(struct ompi_communicator_t *comm, int src,
 
     OPAL_LIST_FOREACH_SAFE (ue, ue_next, &slot->unexpected,
                             ompi_mtl_ofi_hosted_sc_ue_t) {
+        lithe_context_t *sw = NULL;
+
         if (ue->cid != cid || !sc_tag_match(tag, ue->tag)
             || !sc_src_match(src, ue->src_rank)) {
             continue;
         }
         opal_list_remove_item(&slot->unexpected, &ue->super);
+        if (ue->is_sync) {
+            sw = sc_release_ssend(ue);
+        }
         opal_mutex_unlock(&slot->lock);
 
         sc_finish_recv(ofi_req, start, ue->src_rank, ue->tag, ue->buf, ue->len);
-        if (ue->is_sync) {
-            sc_release_ssend(ue);
+        if (NULL != sw) {
+            lithe_context_unblock(sw);
         }
         free(ue->buf);
         OBJ_RELEASE(ue);
@@ -466,6 +573,7 @@ int ompi_mtl_ofi_hosted_sc_try_irecv(struct ompi_communicator_t *comm, int src,
     pr->cid = cid;
     pr->ofi_dual = 0;
     pr->ofi_posted = 0;
+    pr->waiter = NULL;
     opal_list_append(&slot->posted, &pr->super);
     opal_mutex_unlock(&slot->lock);
 
@@ -539,6 +647,7 @@ int ompi_mtl_ofi_hosted_sc_cancel_recv(ompi_mtl_ofi_request_t *ofi_req)
 {
     ompi_mtl_ofi_hosted_sc_slot_t *slot;
     ompi_mtl_ofi_hosted_sc_posted_t *pr, *pr_next;
+    lithe_context_t *w = NULL;
     int found = 0;
 
     if (!sc_enabled || NULL == ofi_req || ofi_req->req_started) {
@@ -553,6 +662,9 @@ int ompi_mtl_ofi_hosted_sc_cancel_recv(ompi_mtl_ofi_request_t *ofi_req)
     OPAL_LIST_FOREACH_SAFE (pr, pr_next, &slot->posted,
                             ompi_mtl_ofi_hosted_sc_posted_t) {
         if (pr->req == ofi_req) {
+            w = pr->waiter;
+            pr->waiter = NULL;
+            sc_clear_waiter_locked(slot, w);
             opal_list_remove_item(&slot->posted, &pr->super);
             OBJ_RELEASE(pr);
             found = 1;
@@ -564,8 +676,83 @@ int ompi_mtl_ofi_hosted_sc_cancel_recv(ompi_mtl_ofi_request_t *ofi_req)
     if (found) {
         ofi_req->super.ompi_req->req_status._cancelled = true;
         ofi_req->super.completion_callback(&ofi_req->super);
+        if (NULL != w) {
+            lithe_context_unblock(w);
+        }
     }
     return found;
+}
+
+int ompi_mtl_ofi_hosted_sc_try_park_pending(void)
+{
+    ompi_mtl_ofi_hosted_sc_slot_t *slot;
+    ompi_mtl_ofi_hosted_sc_posted_t *pr;
+    sc_park_arg_t parg;
+    int pending = 0;
+    unsigned int i;
+    /*
+     * Hosted FULLCORE evidence (P1K4): lithe_context_block/unblock pays
+     * hart_request(-1/+1) and was ~70–90µs vs yield baseline ~48–69µs.
+     * Prefer a short cpu_relax burst so the HELPER hart can finish the peer
+     * send/match, then park only if still pending (directed wake on enqueue).
+     */
+    static __thread unsigned int sc_spin_streak;
+
+    if (!sc_enabled || sc_multi_os_world()) {
+        sc_spin_streak = 0;
+        return 0;
+    }
+    slot = sc_slot_for_vpid(opal_proc_local_get()->proc_name.vpid);
+    if (NULL == slot) {
+        sc_spin_streak = 0;
+        return 0;
+    }
+
+    opal_mutex_lock(&slot->lock);
+    OPAL_LIST_FOREACH (pr, &slot->posted, ompi_mtl_ofi_hosted_sc_posted_t) {
+        if (!pr->req->req_started) {
+            pending = 1;
+            break;
+        }
+    }
+    if (!pending) {
+        opal_mutex_unlock(&slot->lock);
+        sc_spin_streak = 0;
+        return 0;
+    }
+
+    /*
+     * Spin-only while SC recv is pending (no yield, no park). Pure park paid
+     * hart_request(-1/+1) and floored P1K4 at ~70–90µs; yield→steal was ~37%
+     * of samples. Keep directed unblock for ssend park path; recv wait spins
+     * so HELPER can match. After a long streak, park once as backoff.
+     */
+    opal_mutex_unlock(&slot->lock);
+    if (sc_spin_streak < 32u) {
+        sc_spin_streak++;
+        for (i = 0; i < 128u; i++) {
+            cpu_relax();
+        }
+        return 1; /* wait_sync: do not yield this iter */
+    }
+
+    sc_spin_streak = 0;
+    opal_mutex_lock(&slot->lock);
+    pending = 0;
+    OPAL_LIST_FOREACH (pr, &slot->posted, ompi_mtl_ofi_hosted_sc_posted_t) {
+        if (!pr->req->req_started) {
+            pending = 1;
+            break;
+        }
+    }
+    if (!pending) {
+        opal_mutex_unlock(&slot->lock);
+        return 0;
+    }
+    parg.slot = slot;
+    parg.armed = 0;
+    lithe_context_block(sc_park_cb, &parg);
+    return 1;
 }
 
 #endif /* HAVE_LITHE */

@@ -173,6 +173,16 @@ OPAL_DECLSPEC int opal_progress_unregister(opal_progress_callback_t cb);
 OPAL_DECLSPEC void opal_progress_set_block_callback(opal_progress_block_callback_t cb);
 OPAL_DECLSPEC int opal_progress_block(void);
 
+/*
+ * Optional same-OS short-circuit park (MTL registers). Returns 1 if the
+ * current Lithe context parked and was woken; 0 = caller should yield.
+ * Used by wait_sync under hart scarcity so SC waits do not thrash via
+ * yield → empty FJS steal.
+ */
+typedef int (*opal_progress_sc_park_callback_t)(void);
+OPAL_DECLSPEC void opal_progress_set_sc_park_callback(opal_progress_sc_park_callback_t cb);
+OPAL_DECLSPEC int opal_progress_sc_park(void);
+
 #if OPAL_ENABLE_DEBUG
 OPAL_DECLSPEC extern bool opal_progress_debug;
 #endif

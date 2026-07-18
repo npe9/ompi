@@ -109,9 +109,11 @@ static inline int sync_wait_st(ompi_wait_sync_t *sync)
         int events = opal_progress();
 #if HAVE_LITHE
         if (sync->count > 0 && events <= 0) {
-            /* Yield only when harts are scarce; else CQ-park (no yield-storm). */
+            /* Scarce: SC park (MTL callback) else yield; else CQ-park. */
             if (lithe_fork_join_should_yield_to_runnable()) {
-                lithe_context_yield();
+                if (0 == opal_progress_sc_park()) {
+                    lithe_context_yield();
+                }
             } else {
                 opal_progress_block();
             }
