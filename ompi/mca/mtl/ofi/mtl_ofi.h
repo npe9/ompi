@@ -261,17 +261,27 @@ ompi_mtl_ofi_lithe_multicontext_active(void)
 __opal_attribute_always_inline__ static inline void
 mtl_ofi_cq_context_enter_multicontext(int ctxt_id)
 {
-    opal_mutex_lock(&ompi_mtl_ofi.ofi_ctxt[ctxt_id].context_lock);
+    /* Spin on lithe opal_mutex_trylock + scarcity yield — NOT
+     * opal_mutex_atomic_trylock (different lock word) and NOT blocking
+     * opal_mutex_lock (parks the uthread for a short fi_cq_read section). */
+    unsigned spin = 0;
+    while (0 != opal_mutex_trylock(&ompi_mtl_ofi.ofi_ctxt[ctxt_id].context_lock)) {
+        if ((++spin & 63u) == 0u && lithe_fork_join_should_yield_to_runnable()) {
+            lithe_context_yield();
+        } else {
+            cpu_relax();
+        }
+    }
 }
 
 /* Non-blocking variant: returns 1 if the ctxt lock was acquired, 0 otherwise.
- * Used by the throttled peer-ctxt sweep in ompi_mtl_ofi_progress so that an
- * outer progress call never serializes on a peer uthread currently draining
- * its own CQ — we just skip that ctxt this round and try again later. */
+ * Used by the peer-ctxt sweep in ompi_mtl_ofi_progress so that an outer
+ * progress call never blocks on a peer uthread currently draining its CQ.
+ * Must use lithe opal_mutex_trylock (same lock as enter/exit), not atomic. */
 __opal_attribute_always_inline__ static inline int
 mtl_ofi_cq_context_trylock_multicontext(int ctxt_id)
 {
-    return !opal_mutex_atomic_trylock(&ompi_mtl_ofi.ofi_ctxt[ctxt_id].context_lock);
+    return (0 == opal_mutex_trylock(&ompi_mtl_ofi.ofi_ctxt[ctxt_id].context_lock));
 }
 
 __opal_attribute_always_inline__ static inline void
@@ -531,6 +541,58 @@ ompi_mtl_ofi_context_progress_block(int ctxt_id)
     return ompi_mtl_ofi_context_progress(ctxt_id);
 }
 
+#if HAVE_LITHE
+/* Wake any uthread parked on this CQ wait_fd. Required whenever a co-resident
+ * context drains events that another waiter may have armed for — otherwise
+ * unlock-around-park races become lost-wakeup hangs. */
+__opal_attribute_always_inline__ static inline void
+mtl_ofi_mc_wake_cq_waiters(int ctxt_id, int got)
+{
+    int wfd;
+    if (got <= 0) {
+        return;
+    }
+    wfd = ompi_mtl_ofi.ofi_ctxt[ctxt_id].cq_wait_fd;
+    if (wfd >= 0) {
+        (void) parlib_reactor_cancel_fd(wfd);
+    }
+}
+
+/* Own-CQ drain + optional peer trylock sweep. Never parks.
+ * blocking_own=0: trylock own CQ (spin path — do not block a hart on the
+ * shared no-SEP mutex while a peer holds it for fi_cq_read).
+ * blocking_own=1: blocking lock (short non-spin progress / post-wake drain). */
+__opal_attribute_always_inline__ static inline int
+mtl_ofi_mc_progress_once(int ctxt_id, int outer, int sweep_peers, int blocking_own)
+{
+    int count = 0;
+
+    if (blocking_own) {
+        mtl_ofi_cq_context_enter_multicontext(ctxt_id);
+    } else if (!mtl_ofi_cq_context_trylock_multicontext(ctxt_id)) {
+        return 0;
+    }
+    count += ompi_mtl_ofi_context_progress(ctxt_id);
+    mtl_ofi_cq_context_exit_multicontext(ctxt_id);
+    mtl_ofi_mc_wake_cq_waiters(ctxt_id, count);
+
+    if (outer && sweep_peers && (count == 0 || ompi_mtl_ofi.hosted_multi_ep)) {
+        int j;
+        int n = ompi_mtl_ofi.total_ctxts_used;
+        for (j = 1; j < n; j++) {
+            int k = (ctxt_id + j) % n;
+            if (mtl_ofi_cq_context_trylock_multicontext(k)) {
+                int got = ompi_mtl_ofi_context_progress(k);
+                count += got;
+                mtl_ofi_mc_wake_cq_waiters(k, got);
+                mtl_ofi_cq_context_exit_multicontext(k);
+            }
+        }
+    }
+    return count;
+}
+#endif /* HAVE_LITHE */
+
 __opal_attribute_always_inline__ static inline int
 ompi_mtl_ofi_progress(void)
 {
@@ -551,13 +613,15 @@ ompi_mtl_ofi_progress(void)
         mtl_ofi_cq_context_enter_multicontext(ctxt_id);
         count += ompi_mtl_ofi_context_progress(ctxt_id);
         mtl_ofi_cq_context_exit_multicontext(ctxt_id);
+        /* Shared no-SEP CQ: any drain must wake parkers (unlock-around-park). */
+        mtl_ofi_mc_wake_cq_waiters(ctxt_id, count);
 
         /* Multi regular-EP: always trylock-sweep peer CQs on outer progress.
          * Completions land on the destination EP's CQ; skipping the sweep
          * when own CQ had TX events stranded peer recvs (P1K2 hang).
          * After draining a peer CQ, cancel any uthread parked on that CQ's
          * wait_fd — fi_cq_read consumes the event that would have woken them
-         * (lost-wakeup hang). */
+         * (lost-wakeup hang). Same cancel applies to shared single-CQ. */
         if (outer && (count == 0 || ompi_mtl_ofi.hosted_multi_ep)) {
             int j;
             int n = ompi_mtl_ofi.total_ctxts_used;
@@ -567,12 +631,7 @@ ompi_mtl_ofi_progress(void)
                 if (mtl_ofi_cq_context_trylock_multicontext(k)) {
                     int got = ompi_mtl_ofi_context_progress(k);
                     count += got;
-                    if (got > 0 && ompi_mtl_ofi.hosted_multi_ep) {
-                        int wfd = ompi_mtl_ofi.ofi_ctxt[k].cq_wait_fd;
-                        if (wfd >= 0) {
-                            (void) parlib_reactor_cancel_fd(wfd);
-                        }
-                    }
+                    mtl_ofi_mc_wake_cq_waiters(k, got);
                     mtl_ofi_cq_context_exit_multicontext(k);
                 }
             }
@@ -629,40 +688,69 @@ ompi_mtl_ofi_progress_block(void)
 
     if (ompi_mtl_ofi_lithe_multicontext_active()) {
 #if HAVE_LITHE
-        /* Mirror ompi_mtl_ofi_progress: own CQ, then full peer trylock sweep
-         * before blocking on own FI_WAIT_FD (avoids sleeping while a peer CQ
-         * holds the completion that unblocks a co-resident rank). */
+        /* Hosted ranks share CQ(s). NEVER hold context_lock across CQ spin,
+         * lithe_context_yield, or parlib_reactor_wait — that serialized all
+         * co-resident ranks on one Lithe mutex (P1K2 ~56–180µs vs vanilla ~6µs)
+         * and turned should_yield into yield-while-holding-lock churn.
+         * Lock only around fi_cq_read; wake parkers on every successful drain. */
         int outer = ompi_mtl_ofi_litheme_mc_outer_progress_enter();
+        int wait_fd = ompi_mtl_ofi.ofi_ctxt[ctxt_id].cq_wait_fd;
+        unsigned int spin_max = lithe_progress_spin_max();
+        unsigned int si;
+        (void) num_calls_block;
 
-        mtl_ofi_cq_context_enter_multicontext(ctxt_id);
-        count += ompi_mtl_ofi_context_progress(ctxt_id);
-        mtl_ofi_cq_context_exit_multicontext(ctxt_id);
-        if (outer && (count == 0 || ompi_mtl_ofi.hosted_multi_ep)) {
-            int j;
-            int n = ompi_mtl_ofi.total_ctxts_used;
-            (void) num_calls_block;
-            for (j = 1; j < n; j++) {
-                int k = (ctxt_id + j) % n;
-                if (mtl_ofi_cq_context_trylock_multicontext(k)) {
-                    int got = ompi_mtl_ofi_context_progress(k);
-                    count += got;
-                    if (got > 0 && ompi_mtl_ofi.hosted_multi_ep) {
-                        int wfd = ompi_mtl_ofi.ofi_ctxt[k].cq_wait_fd;
-                        if (wfd >= 0) {
-                            (void) parlib_reactor_cancel_fd(wfd);
-                        }
-                    }
-                    mtl_ofi_cq_context_exit_multicontext(k);
-                }
-            }
-        }
+        /* Spin with short blocking CQ drains (lock held only around fi_cq_read).
+         * Pure trylock+infinite-park deadlocked co-resident ranks on shared
+         * no-SEP CQ (both park, nobody drains). Prefer yield under scarcity
+         * over infinite park when RPH>=2. */
+        count = mtl_ofi_mc_progress_once(ctxt_id, outer, 1, 1);
         if (count > 0) {
             ompi_mtl_ofi_litheme_mc_outer_progress_leave();
             return count;
         }
+
+        for (si = 0; si < spin_max; si++) {
+            count = mtl_ofi_mc_progress_once(ctxt_id, outer, 1, 1);
+            if (count > 0) {
+                ompi_mtl_ofi_litheme_mc_outer_progress_leave();
+                return count;
+            }
+            if (lithe_fork_join_should_yield_to_runnable()) {
+                lithe_context_yield();
+                continue;
+            }
+            cpu_relax();
+        }
+
+        /* Single-OS-process hosted (LITHE_MTL_OFI_SINGLE_OS=1 from launcher when
+         * NTASKS==1): do not park on the CQ fd — shared no-SEP waiters race on
+         * edge wakeups, and park floors P1K2 Barrier+Allreduce. Yield if scarce,
+         * drain once more, return to wait_sync. Multi-OS: timed park so remote
+         * completions can wake us (P2K2 needs this; no-park → ~800µs). */
+        {
+            static int single_os = -1;
+            if (single_os < 0) {
+                const char *e = getenv("LITHE_MTL_OFI_SINGLE_OS");
+                single_os = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
+            }
+            if (single_os || wait_fd < 0) {
+                if (lithe_fork_join_should_yield_to_runnable()) {
+                    lithe_context_yield();
+                }
+                count = mtl_ofi_mc_progress_once(ctxt_id, outer, 1, 1);
+                ompi_mtl_ofi_litheme_mc_outer_progress_leave();
+                return count;
+            }
+        }
+        /* Multi-OS: serialize CQ park behind context_lock (only one waiter on
+         * the shared wait_fd). Unlock-around-park let both local ranks park;
+         * with soft_cap=RPH nobody drove the reactor → ~800µs means. Holding
+         * the lock across park is the prior P2K2 ~20µs path; single-OS uses
+         * the nopark path above instead. */
         mtl_ofi_cq_context_enter_multicontext(ctxt_id);
         count += ompi_mtl_ofi_context_progress_block(ctxt_id);
         mtl_ofi_cq_context_exit_multicontext(ctxt_id);
+        mtl_ofi_mc_wake_cq_waiters(ctxt_id, count);
         ompi_mtl_ofi_litheme_mc_outer_progress_leave();
         return count;
 #endif
