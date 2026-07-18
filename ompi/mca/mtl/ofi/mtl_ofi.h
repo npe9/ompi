@@ -726,7 +726,7 @@ ompi_mtl_ofi_progress_block(void)
         /* Single-OS-process hosted (LITHE_MTL_OFI_SINGLE_OS=1 from launcher when
          * NTASKS==1): do not park on the CQ fd — shared no-SEP waiters race on
          * edge wakeups, and park floors P1K2 Barrier+Allreduce. Yield if scarce,
-         * drain once more, return to wait_sync. Multi-OS: timed park so remote
+         * drain once more, return to wait_sync. Multi-OS: CQ park so remote
          * completions can wake us (P2K2 needs this; no-park → ~800µs). */
         {
             static int single_os = -1;
@@ -743,11 +743,16 @@ ompi_mtl_ofi_progress_block(void)
                 return count;
             }
         }
-        /* Multi-OS: serialize CQ park behind context_lock (only one waiter on
-         * the shared wait_fd). Unlock-around-park let both local ranks park;
-         * with soft_cap=RPH nobody drove the reactor → ~800µs means. Holding
-         * the lock across park is the prior P2K2 ~20µs path; single-OS uses
-         * the nopark path above instead. */
+        /* Multi-OS: serialize CQ park behind context_lock (one waiter on the
+         * shared wait_fd). Yield only under hart scarcity — not whenever
+         * runnable_count>0 (the park+pump helper is often RUNNABLE and would
+         * suppress CQ park entirely → no kernel entry → cxi hang). */
+        if (lithe_fork_join_should_yield_to_runnable()) {
+            lithe_context_yield();
+            count = mtl_ofi_mc_progress_once(ctxt_id, outer, 1, 1);
+            ompi_mtl_ofi_litheme_mc_outer_progress_leave();
+            return count;
+        }
         mtl_ofi_cq_context_enter_multicontext(ctxt_id);
         count += ompi_mtl_ofi_context_progress_block(ctxt_id);
         mtl_ofi_cq_context_exit_multicontext(ctxt_id);

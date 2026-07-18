@@ -3,8 +3,12 @@
  *
  * Co-resident logical ranks (same vpid/RPH host) match via per-slot posted
  * and unexpected queues with memcpy — no cxi/OFI loopback. Cross-OS peers
- * still use OFI. MPI_ANY_SOURCE dual-posts (SC + fi_trecv) so remote traffic
- * still completes.
+ * still use OFI.
+ *
+ * Single-OS (num_procs == RPH): ANY_SOURCE is local-only (no fi_trecv).
+ * Multi-OS: specific-source same-OS uses full SC queues; ANY_SOURCE never
+ * dual-posts (SC + fi_trecv races with CQ cancel) — match local UE then
+ * fall through to OFI for remote. RD Barrier/Allreduce use specific ranks.
  */
 
 #include "ompi_config.h"
@@ -59,6 +63,12 @@ typedef struct {
 static ompi_mtl_ofi_hosted_sc_slot_t *sc_slots = NULL;
 static unsigned long sc_nslots = 0;
 static int sc_enabled = 0;
+
+/* True when logical world spans more than one OS process (P>1). */
+static int sc_multi_os_world(void)
+{
+    return (opal_process_info.num_procs > opal_lithe_env_cache_rph()) ? 1 : 0;
+}
 
 static int sc_tag_match(int posted_tag, int msg_tag)
 {
@@ -167,12 +177,12 @@ int ompi_mtl_ofi_hosted_sc_enabled(void)
         return 0;
     }
     /*
-     * Multi-OS (num_procs > RPH): keep OFI for now. ANY_SOURCE dual-post
-     * across OS processes still races with CQ cancel; P2K2 must stay correct.
-     * Same-OS short-circuit applies when the whole world fits in one process.
+     * Active for hosted RPH>=2 on both single-OS and multi-OS. Per-peer
+     * same_os() gates memcpy vs OFI; ANY_SOURCE dual-post is never used
+     * on multi-OS (see try_irecv).
      */
     rph = opal_lithe_env_cache_rph();
-    if (rph < 2UL || opal_process_info.num_procs > rph) {
+    if (rph < 2UL) {
         return 0;
     }
     return 1;
@@ -183,10 +193,13 @@ int ompi_mtl_ofi_hosted_sc_same_os(struct ompi_proc_t *peer)
     unsigned long rph;
     opal_vpid_t me, them;
 
-    if (!ompi_mtl_ofi_hosted_sc_enabled() || NULL == peer) {
+    if (!sc_enabled || NULL == peer) {
         return 0;
     }
     rph = opal_lithe_env_cache_rph();
+    if (rph < 2UL) {
+        return 0;
+    }
     me = opal_proc_local_get()->proc_name.vpid;
     them = peer->super.proc_name.vpid;
     return ((me / (opal_vpid_t) rph) == (them / (opal_vpid_t) rph));
@@ -222,8 +235,8 @@ int ompi_mtl_ofi_hosted_sc_init(void)
     }
     sc_enabled = 1;
     opal_output_verbose(1, opal_common_ofi.output,
-                        "mtl:ofi: hosted same-OS short-circuit enabled (slots=%lu)",
-                        rph);
+                        "mtl:ofi: hosted same-OS short-circuit enabled (slots=%lu multi_os=%d)",
+                        rph, sc_multi_os_world());
     return OMPI_SUCCESS;
 }
 
@@ -387,7 +400,7 @@ int ompi_mtl_ofi_hosted_sc_try_irecv(struct ompi_communicator_t *comm, int src,
     ompi_mtl_ofi_hosted_sc_ue_t *ue, *ue_next;
     ompi_mtl_ofi_hosted_sc_posted_t *pr;
     int cid;
-    int dual = 0;
+    int any_src_ofi_only = 0;
 
     if (!sc_enabled) {
         return 0;
@@ -398,15 +411,12 @@ int ompi_mtl_ofi_hosted_sc_try_irecv(struct ompi_communicator_t *comm, int src,
         if (!ompi_mtl_ofi_hosted_sc_same_os(peer)) {
             return 0;
         }
-    } else {
+    } else if (sc_multi_os_world()) {
         /*
-         * Single-OS world (num_procs == RPH): all peers are co-resident —
-         * local match only, no fi_trecv dual-post race.
-         * Multi-OS: dual-post so remote traffic still completes via OFI.
+         * Multi-OS ANY_SOURCE: never dual-post (SC + fi_trecv + cancel races).
+         * Claim a local unexpected if present, else OFI-only for remote.
          */
-        if (opal_process_info.num_procs > opal_lithe_env_cache_rph()) {
-            dual = 1;
-        }
+        any_src_ofi_only = 1;
     }
 
     slot = sc_slot_for_vpid(opal_proc_local_get()->proc_name.vpid);
@@ -438,6 +448,12 @@ int ompi_mtl_ofi_hosted_sc_try_irecv(struct ompi_communicator_t *comm, int src,
         return 1;
     }
 
+    if (any_src_ofi_only) {
+        /* No local UE — wait on OFI only; do not leave an SC posted entry. */
+        opal_mutex_unlock(&slot->lock);
+        return 0;
+    }
+
     pr = OBJ_NEW(ompi_mtl_ofi_hosted_sc_posted_t);
     if (NULL == pr) {
         opal_mutex_unlock(&slot->lock);
@@ -448,12 +464,12 @@ int ompi_mtl_ofi_hosted_sc_try_irecv(struct ompi_communicator_t *comm, int src,
     pr->tag = tag;
     pr->src = src;
     pr->cid = cid;
-    pr->ofi_dual = dual;
+    pr->ofi_dual = 0;
     pr->ofi_posted = 0;
     opal_list_append(&slot->posted, &pr->super);
     opal_mutex_unlock(&slot->lock);
 
-    return dual ? 2 : 1;
+    return 1;
 }
 
 /* Mark that fi_trecv was posted for a dual-posted ANY_SOURCE recv. */

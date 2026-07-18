@@ -3,6 +3,8 @@
  *
  * Co-resident logical ranks (vpid/RPH equal) exchange via memcpy + local
  * match queues instead of cxi/OFI loopback. Remote OS peers still use OFI.
+ * Works for single-OS and multi-OS; multi-OS ANY_SOURCE is OFI-only (no
+ * dual-post). RD collectives use specific ranks so co-resident steps SC.
  *
  * Enable (default on when hosted RPH>=2): LITHE_MTL_OFI_HOSTED_SC=1
  * Disable: LITHE_MTL_OFI_HOSTED_SC=0
@@ -46,8 +48,8 @@ int ompi_mtl_ofi_hosted_sc_try_send(struct ompi_communicator_t *comm, int dest,
                                     bool is_isend);
 
 /*
- * Irecv. Returns 1 if fully handled (no fi_trecv); 2 if posted locally and
- * caller should ALSO fi_trecv (ANY_SOURCE dual-post); 0 = OFI only.
+ * Irecv. Returns 1 if fully handled (no fi_trecv); 0 = OFI only.
+ * (Return 2 / dual-post is unused — multi-OS ANY_SOURCE is OFI-only.)
  */
 int ompi_mtl_ofi_hosted_sc_try_irecv(struct ompi_communicator_t *comm, int src,
                                      int tag, void *start, size_t length,

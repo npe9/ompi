@@ -28,6 +28,8 @@
 #include "ompi/memchecker.h"
 #include "ompi/runtime/ompi_spc.h"
 #include "ompi/runtime/ompi_lithe_world_coll.h"
+#include "ompi/proc/proc.h"
+#include "ompi/mca/coll/base/coll_base_functions.h"
 
 #if OMPI_BUILD_MPI_PROFILING
 #if OPAL_HAVE_WEAK_SYMBOLS
@@ -75,7 +77,18 @@ int MPI_Barrier(MPI_Comm comm)
   if (OMPI_COMM_IS_INTRA(comm)) {
     if (ompi_comm_size(comm) > 1) {
       ompi_lithe_world_coll_lock(comm);
-      err = comm->c_coll->coll_barrier(comm, comm->c_coll->coll_barrier_module);
+      /*
+       * Hosted Lithe multicontext: tuned/basic barrier algorithms that reuse
+       * per-comm state (or bruck with asymmetric peers) deadlock with
+       * same-OS MTL short-circuit on multi-OS P×K. Mirror Allreduce: use
+       * stack recursive-doubling Sendrecv-zero only.
+       */
+      if (OPAL_UNLIKELY(ompi_rte_lithe_hosted_multicontext_active)) {
+        err = ompi_coll_base_barrier_intra_recursivedoubling(
+            comm, comm->c_coll->coll_barrier_module);
+      } else {
+        err = comm->c_coll->coll_barrier(comm, comm->c_coll->coll_barrier_module);
+      }
       ompi_lithe_world_coll_unlock(comm);
     }
   }
