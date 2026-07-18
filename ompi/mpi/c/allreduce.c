@@ -132,9 +132,14 @@ int MPI_Allreduce(const void *sendbuf, void *recvbuf, int count,
      */
     if (OPAL_UNLIKELY(ompi_rte_lithe_hosted_multicontext_active) &&
         OMPI_COMM_IS_INTRA(comm)) {
-        err = ompi_coll_base_allreduce_intra_recursivedoubling(
-            sendbuf, recvbuf, count, datatype, op, comm,
-            comm->c_coll->coll_allreduce_module);
+        /* Same-OS: flat arrival+local reduce (one sync). Else RD Sendrecv. */
+        err = ompi_lithe_hosted_sc_coll_allreduce(sendbuf, recvbuf, count,
+                                                  datatype, op, comm);
+        if (OMPI_ERR_NOT_AVAILABLE == err) {
+            err = ompi_coll_base_allreduce_intra_recursivedoubling(
+                sendbuf, recvbuf, count, datatype, op, comm,
+                comm->c_coll->coll_allreduce_module);
+        }
     } else {
         err = comm->c_coll->coll_allreduce(sendbuf, recvbuf, count,
                                           datatype, op, comm,

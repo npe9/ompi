@@ -84,8 +84,12 @@ int MPI_Barrier(MPI_Comm comm)
        * stack recursive-doubling Sendrecv-zero only.
        */
       if (OPAL_UNLIKELY(ompi_rte_lithe_hosted_multicontext_active)) {
-        err = ompi_coll_base_barrier_intra_recursivedoubling(
-            comm, comm->c_coll->coll_barrier_module);
+        /* Same-OS: sense-reversing arrival (one sync). Else RD Sendrecv-zero. */
+        err = ompi_lithe_hosted_sc_coll_barrier(comm);
+        if (OMPI_ERR_NOT_AVAILABLE == err) {
+          err = ompi_coll_base_barrier_intra_recursivedoubling(
+              comm, comm->c_coll->coll_barrier_module);
+        }
       } else {
         err = comm->c_coll->coll_barrier(comm, comm->c_coll->coll_barrier_module);
       }
