@@ -269,6 +269,23 @@ int opal_progress_block(void)
         if (events > 0) {
             return events;
         }
+#if HAVE_LITHE
+        /*
+         * Single-OS: do not fall through to opal_thread_yield() — that strands
+         * SC waiters vs flat Barrier (P1K8/P1K16). Multi-OS still yields after
+         * an empty CQ park so co-resident ranks can run (P2K2 needs this).
+         */
+        {
+            static int single_os = -1;
+            if (single_os < 0) {
+                const char *e = getenv("LITHE_MTL_OFI_SINGLE_OS");
+                single_os = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
+            }
+            if (single_os) {
+                return 0;
+            }
+        }
+#endif
     }
 
     opal_thread_yield();

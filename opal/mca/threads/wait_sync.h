@@ -36,8 +36,10 @@
 #include "opal/sys/atomic.h"
 
 #if HAVE_LITHE
+#include <stdlib.h>
 #include <lithe/fork_join_sched.h>
 #include <lithe/lithe.h>
+#include <parlib/arch.h> /* cpu_relax */
 #endif
 
 BEGIN_C_DECLS
@@ -112,10 +114,24 @@ static inline int sync_wait_st(ompi_wait_sync_t *sync)
             /* Prefer SC spin; see ompi_sync_wait_mt for rationale. */
             if (opal_progress_sc_park()) {
                 /* handled */
-            } else if (lithe_fork_join_should_yield_to_runnable()) {
-                lithe_context_yield();
             } else {
-                opal_progress_block();
+                static int single_os = -1;
+                if (single_os < 0) {
+                    const char *e = getenv("LITHE_MTL_OFI_SINGLE_OS");
+                    single_os = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
+                }
+                if (single_os) {
+                    /* see ompi_sync_wait_mt: never yield on single-OS SC */
+#if HAVE_LITHE
+                    cpu_relax();
+#else
+                    (void) 0;
+#endif
+                } else if (lithe_fork_join_should_yield_to_runnable()) {
+                    lithe_context_yield();
+                } else {
+                    (void) opal_progress_block();
+                }
             }
         }
 #endif

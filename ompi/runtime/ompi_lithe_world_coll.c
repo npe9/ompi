@@ -32,6 +32,7 @@
 #include "ompi/runtime/ompi_rte.h"
 
 #if HAVE_LITHE
+#include <lithe/fork_join_sched.h>
 #include <parlib/arch.h> /* cpu_relax */
 #endif
 
@@ -342,19 +343,30 @@ static void sc_coll_ticket_barrier(int size, int with_progress)
             break;
         }
         /*
-         * Single-OS: spin only (no yield). Pairwise stragglers use MTP=RPH
-         * + SC spin-without-park — yield here hung P1K4 under MTP=RPH.
-         *
          * Multi-OS: non-leaders wait here while the leader does cross-OS
          * Sendrecv; without opal_progress the shared CQ park starves (~10×
-         * P2K2 regression). Pump progress every spin; still no context_yield.
+         * P2K2 regression). Throttle: every-spin opal_progress taxed P2K2.
+         *
+         * Single-OS: prefer cpu_relax, but if a peer is RUNNABLE (e.g. still
+         * in pairwise RD-SUM after we arrived), donate the hart. With
+         * HELPER soft_cap=RPH+1, should_yield stays false while owned<budget
+         * so a yielded straggler never gets a hart unless barrier waiters
+         * yield — P1K8/P1K16 pairwise flakes. Only yield after we have
+         * arrived (ticket taken); unconditional yield-before-arrive hung
+         * P1K4 under MTP=RPH.
          */
-        /* Throttle progress: every-spin opal_progress taxed P2K2 ~10×. */
         if (with_progress && (0 == (spin & 63U))) {
             (void) opal_progress();
         }
 #if HAVE_LITHE
-        cpu_relax();
+        if (!with_progress && lithe_fork_join_should_yield_to_runnable()) {
+            lithe_context_yield();
+        } else if (!with_progress && lithe_fork_join_current_runnable_count() > 0) {
+            /* Spare-hart soft_cap: should_yield false but peer needs a hart. */
+            lithe_context_yield();
+        } else {
+            cpu_relax();
+        }
         spin++;
 #else
         (void) spin;

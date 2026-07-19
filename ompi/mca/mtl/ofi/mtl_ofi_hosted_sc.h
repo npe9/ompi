@@ -65,10 +65,9 @@ void ompi_mtl_ofi_hosted_sc_ofi_recv_claimed(ompi_mtl_ofi_request_t *ofi_req);
 int ompi_mtl_ofi_hosted_sc_cancel_recv(ompi_mtl_ofi_request_t *ofi_req);
 
 /*
- * Single-OS SC wait helper for wait_sync. If this rank has a pending same-OS
- * posted recv: cpu_relax spin (avoid yield→empty steal and park→hart-release
- * flakes under flat Barrier). Returns 1 if handled (caller must not yield),
- * 0 otherwise. Multi-OS returns 0.
+ * SC wait helper for wait_sync. Single-OS: always spin-suppress yield.
+ * Multi-OS: spin-suppress only while a same-OS SC recv is pending (else 0
+ * so CQ-park can run for cross-OS OFI).
  */
 int ompi_mtl_ofi_hosted_sc_try_park_pending(void);
 

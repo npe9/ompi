@@ -18,9 +18,12 @@
 
 #include "opal/mca/threads/wait_sync.h"
 
+#include <stdlib.h>
+
 #if HAVE_LITHE
 #include <lithe/fork_join_sched.h>
 #include <lithe/lithe.h>
+#include <parlib/arch.h> /* cpu_relax */
 #endif
 
 static opal_mutex_t wait_sync_lock = OPAL_MUTEX_STATIC_INIT;
@@ -142,13 +145,26 @@ check_status:
              * fell into CQ progress_block while a peer matched via memcpy, then
              * a later SC park backoff could strand one rank (P1K4 pairwise
              * ~1/10 timeout: three ranks OK, one never finishes RD-SUM).
+             *
+             * Single-OS (LITHE_MTL_OFI_SINGLE_OS=1): never yield — peers may
+             * already be in flat Barrier spin; yielding strands this waiter
+             * when soft_cap spare harts do not show up (P1K8/P1K16).
              */
             if (opal_progress_sc_park()) {
                 /* SC spin handled this iter; do not yield/CQ-park. */
-            } else if (lithe_fork_join_should_yield_to_runnable()) {
-                lithe_context_yield();
             } else {
-                opal_progress_block();
+                static int single_os = -1;
+                if (single_os < 0) {
+                    const char *e = getenv("LITHE_MTL_OFI_SINGLE_OS");
+                    single_os = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
+                }
+                if (single_os) {
+                    cpu_relax();
+                } else if (lithe_fork_join_should_yield_to_runnable()) {
+                    lithe_context_yield();
+                } else {
+                    (void) opal_progress_block();
+                }
             }
         }
 #else

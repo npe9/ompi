@@ -661,14 +661,20 @@ int ompi_mtl_ofi_hosted_sc_try_park_pending(void)
     ompi_mtl_ofi_hosted_sc_slot_t *slot;
     ompi_mtl_ofi_hosted_sc_posted_t *pr;
     int pending = 0;
-    unsigned int i;
+    unsigned int i, spins;
 
+    /* Multi-OS: never suppress CQ park here (park+pump / cross-OS OFI).
+     * Pending same-OS SC on multi-OS still completes via peer send match;
+     * returning 1 while an OFI recv is outstanding hung P2K2. */
     if (!sc_enabled || sc_multi_os_world()) {
         return 0;
     }
     slot = sc_slot_for_vpid(opal_proc_local_get()->proc_name.vpid);
     if (NULL == slot) {
-        return 0;
+        for (i = 0; i < 32u; i++) {
+            cpu_relax();
+        }
+        return 1;
     }
 
     opal_mutex_lock(&slot->lock);
@@ -678,24 +684,18 @@ int ompi_mtl_ofi_hosted_sc_try_park_pending(void)
             break;
         }
     }
-    if (!pending) {
-        opal_mutex_unlock(&slot->lock);
-        return 0;
-    }
+    opal_mutex_unlock(&slot->lock);
 
     /*
-     * Spin-only while SC recv is pending (no yield, no park). Pure park paid
-     * hart_request(-1/+1) and floored P1K4 at ~70–90µs; yield→steal was ~37%
-     * of samples. Park-after-streak also flakes P1K4 pairwise: a straggler
-     * releases its hart, peers finish RD-SUM and enter flat Barrier (spin, no
-     * yield), and the straggler never runs again (~1/10 job timeout). Keep
-     * directed unblock for the ssend park path only.
+     * Single-OS: always spin-suppress yield/CQ-park in wait_sync. Gaps
+     * between Sendrecv rounds used to return 0 → lithe_context_yield while
+     * peers entered flat Barrier (P1K8/P1K16 pairwise flakes).
      */
-    opal_mutex_unlock(&slot->lock);
-    for (i = 0; i < 128u; i++) {
+    spins = pending ? 128u : 32u;
+    for (i = 0; i < spins; i++) {
         cpu_relax();
     }
-    return 1; /* wait_sync: do not yield this iter */
+    return 1;
 }
 
 #endif /* HAVE_LITHE */
