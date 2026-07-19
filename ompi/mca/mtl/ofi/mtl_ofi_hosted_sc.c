@@ -67,11 +67,6 @@ typedef struct {
 
 typedef struct {
     ompi_mtl_ofi_hosted_sc_slot_t *slot;
-    int armed; /* 1 if at least one posted entry still pending */
-} sc_park_arg_t;
-
-typedef struct {
-    ompi_mtl_ofi_hosted_sc_slot_t *slot;
     ompi_mtl_ofi_hosted_sc_ue_t *ue;
     ompi_mtl_ofi_request_t *sreq;
 } sc_ssend_park_arg_t;
@@ -102,28 +97,6 @@ static void sc_clear_waiter_locked(ompi_mtl_ofi_hosted_sc_slot_t *slot,
         if (ue->send_waiter == w) {
             ue->send_waiter = NULL;
         }
-    }
-}
-
-static void sc_park_cb(lithe_context_t *context, void *arg)
-{
-    sc_park_arg_t *a = (sc_park_arg_t *) arg;
-    ompi_mtl_ofi_hosted_sc_posted_t *pr;
-    int pending = 0;
-
-    /* Lock held by try_park_pending across lithe_context_block entry. */
-    OPAL_LIST_FOREACH (pr, &a->slot->posted, ompi_mtl_ofi_hosted_sc_posted_t) {
-        if (pr->req->req_started) {
-            continue;
-        }
-        pr->waiter = context;
-        pending = 1;
-    }
-    a->armed = pending;
-    opal_mutex_unlock(&a->slot->lock);
-    if (!pending) {
-        /* Matched before arming — resume immediately (state is BLOCKED). */
-        lithe_context_unblock(context);
     }
 }
 
@@ -687,24 +660,14 @@ int ompi_mtl_ofi_hosted_sc_try_park_pending(void)
 {
     ompi_mtl_ofi_hosted_sc_slot_t *slot;
     ompi_mtl_ofi_hosted_sc_posted_t *pr;
-    sc_park_arg_t parg;
     int pending = 0;
     unsigned int i;
-    /*
-     * Hosted FULLCORE evidence (P1K4): lithe_context_block/unblock pays
-     * hart_request(-1/+1) and was ~70–90µs vs yield baseline ~48–69µs.
-     * Prefer a short cpu_relax burst so the HELPER hart can finish the peer
-     * send/match, then park only if still pending (directed wake on enqueue).
-     */
-    static __thread unsigned int sc_spin_streak;
 
     if (!sc_enabled || sc_multi_os_world()) {
-        sc_spin_streak = 0;
         return 0;
     }
     slot = sc_slot_for_vpid(opal_proc_local_get()->proc_name.vpid);
     if (NULL == slot) {
-        sc_spin_streak = 0;
         return 0;
     }
 
@@ -717,42 +680,22 @@ int ompi_mtl_ofi_hosted_sc_try_park_pending(void)
     }
     if (!pending) {
         opal_mutex_unlock(&slot->lock);
-        sc_spin_streak = 0;
         return 0;
     }
 
     /*
      * Spin-only while SC recv is pending (no yield, no park). Pure park paid
      * hart_request(-1/+1) and floored P1K4 at ~70–90µs; yield→steal was ~37%
-     * of samples. Keep directed unblock for ssend park path; recv wait spins
-     * so HELPER can match. After a long streak, park once as backoff.
+     * of samples. Park-after-streak also flakes P1K4 pairwise: a straggler
+     * releases its hart, peers finish RD-SUM and enter flat Barrier (spin, no
+     * yield), and the straggler never runs again (~1/10 job timeout). Keep
+     * directed unblock for the ssend park path only.
      */
     opal_mutex_unlock(&slot->lock);
-    if (sc_spin_streak < 32u) {
-        sc_spin_streak++;
-        for (i = 0; i < 128u; i++) {
-            cpu_relax();
-        }
-        return 1; /* wait_sync: do not yield this iter */
+    for (i = 0; i < 128u; i++) {
+        cpu_relax();
     }
-
-    sc_spin_streak = 0;
-    opal_mutex_lock(&slot->lock);
-    pending = 0;
-    OPAL_LIST_FOREACH (pr, &slot->posted, ompi_mtl_ofi_hosted_sc_posted_t) {
-        if (!pr->req->req_started) {
-            pending = 1;
-            break;
-        }
-    }
-    if (!pending) {
-        opal_mutex_unlock(&slot->lock);
-        return 0;
-    }
-    parg.slot = slot;
-    parg.armed = 0;
-    lithe_context_block(sc_park_cb, &parg);
-    return 1;
+    return 1; /* wait_sync: do not yield this iter */
 }
 
 #endif /* HAVE_LITHE */

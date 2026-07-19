@@ -136,11 +136,17 @@ check_status:
          * burning the core.
          */
         if (sync->count > 0 && events <= 0) {
-            /* Scarce: SC park (MTL callback) else yield; else CQ-park. */
-            if (lithe_fork_join_should_yield_to_runnable()) {
-                if (0 == opal_progress_sc_park()) {
-                    lithe_context_yield();
-                }
+            /*
+             * Prefer same-OS SC spin first (MTL callback). Nesting it under
+             * should_yield skipped SC when soft_cap had spare harts — waiters
+             * fell into CQ progress_block while a peer matched via memcpy, then
+             * a later SC park backoff could strand one rank (P1K4 pairwise
+             * ~1/10 timeout: three ranks OK, one never finishes RD-SUM).
+             */
+            if (opal_progress_sc_park()) {
+                /* SC spin handled this iter; do not yield/CQ-park. */
+            } else if (lithe_fork_join_should_yield_to_runnable()) {
+                lithe_context_yield();
             } else {
                 opal_progress_block();
             }

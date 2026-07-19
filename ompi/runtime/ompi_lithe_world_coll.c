@@ -207,9 +207,11 @@ static void sc_coll_ticket_barrier(int size)
             break;
         }
         /*
-         * Spin only (no yield). soft_cap≥RPH keeps K harts online for
-         * single-OS worlds; yielding here reintroduces empty-steal noise and
-         * rare pairwise→coll handoff hangs under HOSTED_FULLCORE.
+         * Spin only (no yield). Pairwise stragglers are handled by
+         * single-OS OMPI_MCA_opal_max_thread_in_progress=RPH (no cond_wait)
+         * plus SC spin-without-park in wait_sync — not by yielding here.
+         * Yield-on-runnable thrashed against HELPER harts and hung P1K4
+         * flat coll after pairwise OK under MTP=RPH.
          */
 #if HAVE_LITHE
         cpu_relax();
