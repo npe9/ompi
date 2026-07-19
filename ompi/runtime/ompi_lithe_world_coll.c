@@ -16,13 +16,18 @@
 
 #include "opal/class/opal_object.h"
 #include "opal/mca/threads/mutex.h"
+#include "opal/runtime/opal_progress.h"
 #include "opal/sys/atomic.h"
 #include "opal/util/proc.h"
 
 #include "ompi/communicator/communicator.h"
 #include "ompi/datatype/ompi_datatype.h"
+#include "ompi/mca/coll/base/coll_base_util.h"
+#include "ompi/mca/coll/base/coll_tags.h"
+#include "ompi/mca/pml/pml.h"
 #include "ompi/op/op.h"
 #include "ompi/proc/proc.h"
+#include "ompi/request/request.h"
 #include "ompi/runtime/ompi_lithe_world_coll.h"
 #include "ompi/runtime/ompi_rte.h"
 
@@ -94,12 +99,16 @@ void ompi_lithe_world_coll_unlock(MPI_Comm comm)
 }
 
 /*
- * Same-OS flat Barrier / Allreduce for hosted Lithe multicontext.
+ * Hosted Lithe flat Barrier / Allreduce.
  *
- * RD Allreduce on P1K4 is 2 Sendrecv rounds (+ Barrier's 2) through MTL SC
- * match/wait (~41µs floor post-SC-spin). One sense-reversing arrival barrier
- * plus a local reduce replaces those match rounds when every peer is in this
- * OS process. Multi-OS (P2K*) keeps RD.
+ * Same-OS (P1K*): ticket barrier + local reduce — cuts RD Sendrecv/SC match
+ * rounds (P1K4 ~41µs → ~7µs).
+ *
+ * Multi-OS (P2K*): hybrid — local ticket barrier/reduce among the RPH
+ * co-resident ranks, then leader-only recursive-doubling Sendrecv across OS
+ * processes (1 cross-OS round for P=2). Non-leaders spin on the next local
+ * ticket (leader self-progresses PML). Regular packing only: size % RPH == 0
+ * and contiguous vpids per OS.
  *
  * LITHE_HOSTED_SC_FLAT_COLL=0 disables (fallback RD).
  */
@@ -132,13 +141,25 @@ static bool sc_flat_coll_enabled(void)
     return true;
 }
 
-static bool sc_coll_single_os_intra(struct ompi_communicator_t *comm)
-{
-    int size, rank, r;
+typedef struct {
     unsigned long rph;
-    opal_vpid_t me, my_os;
+    int size;
+    int rank;
+    int local_slot;   /* vpid % rph */
+    int leader_rank;  /* os_id * rph */
+    int num_os;
+    int is_leader;
+    int single_os;    /* whole world on this OS */
+} sc_coll_layout_t;
+
+static bool sc_coll_layout(struct ompi_communicator_t *comm, sc_coll_layout_t *L)
+{
+    int r, os_counts[OMPI_LITHE_SC_COLL_MAX_RANKS];
+    unsigned long rph;
+    opal_vpid_t me, my_os, peer_os, expect;
     ompi_proc_t *peer;
 
+    memset(L, 0, sizeof(*L));
     if (!ompi_rte_lithe_hosted_multicontext_active || !OMPI_COMM_IS_INTRA(comm)) {
         return false;
     }
@@ -146,29 +167,143 @@ static bool sc_coll_single_os_intra(struct ompi_communicator_t *comm)
         return false;
     }
     rph = opal_lithe_env_cache_rph();
-    if (rph < 2UL) {
+    if (rph < 2UL || rph > (unsigned long) OMPI_LITHE_SC_COLL_MAX_RANKS) {
         return false;
     }
-    size = ompi_comm_size(comm);
-    if (size < 2 || size > OMPI_LITHE_SC_COLL_MAX_RANKS) {
+    L->size = ompi_comm_size(comm);
+    if (L->size < 2 || L->size > OMPI_LITHE_SC_COLL_MAX_RANKS) {
         return false;
     }
-    rank = ompi_comm_rank(comm);
+    if ((L->size % (int) rph) != 0) {
+        return false;
+    }
+    L->rph = rph;
+    L->num_os = L->size / (int) rph;
+    L->rank = ompi_comm_rank(comm);
     me = opal_proc_local_get()->proc_name.vpid;
     my_os = me / (opal_vpid_t) rph;
-    for (r = 0; r < size; ++r) {
-        if (r == rank) {
-            continue;
-        }
+    L->local_slot = (int) (me % (opal_vpid_t) rph);
+    L->leader_rank = (int) (my_os * (opal_vpid_t) rph);
+    L->is_leader = (L->local_slot == 0);
+    L->single_os = (L->num_os == 1);
+
+    /* Contiguous regular packing: rank r lives on OS floor(r/rph) with
+     * vpid == r (hosted COMM_WORLD convention). */
+    memset(os_counts, 0, sizeof(os_counts));
+    for (r = 0; r < L->size; ++r) {
         peer = ompi_comm_peer_lookup(comm, r);
         if (NULL == peer) {
             return false;
         }
-        if ((peer->super.proc_name.vpid / (opal_vpid_t) rph) != my_os) {
+        expect = (opal_vpid_t) r;
+        if (peer->super.proc_name.vpid != expect) {
+            return false;
+        }
+        peer_os = expect / (opal_vpid_t) rph;
+        if (peer_os >= (opal_vpid_t) L->num_os) {
+            return false;
+        }
+        os_counts[peer_os]++;
+    }
+    for (r = 0; r < L->num_os; ++r) {
+        if (os_counts[r] != (int) rph) {
+            return false;
+        }
+    }
+    /*
+     * Multi-OS hybrid (local ticket + leader RD) is OPT-IN only.
+     * Default keeps RD+SC/OFI: P2K2 ~15µs held; P2K4 ~170µs.
+     * LITHE_HOSTED_SC_FLAT_MULTI_OS=1 enables hybrid — can occasionally hit
+     * ~20µs on P2K8 but median regresses (P2K2 ~250µs, P2K4 ~200µs+) until
+     * cross-OS leader progress/CQ park is sorted. Power-of-two OS count.
+     */
+    if (!L->single_os) {
+        const char *mos = getenv("LITHE_HOSTED_SC_FLAT_MULTI_OS");
+        if (NULL == mos || '1' != mos[0] || '\0' != mos[1]) {
+            return false;
+        }
+        if (L->num_os < 2 || (L->num_os & (L->num_os - 1)) != 0) {
             return false;
         }
     }
     return true;
+}
+
+/* 0-byte pairwise sync for leader barrier (mirrors coll_base barrier). */
+static int sc_coll_sendrecv_zero(struct ompi_communicator_t *comm, int peer, int tag)
+{
+    int rc;
+    ompi_request_t *req = MPI_REQUEST_NULL;
+
+    rc = MCA_PML_CALL(irecv(NULL, 0, MPI_BYTE, peer, tag, comm, &req));
+    if (MPI_SUCCESS != rc) {
+        return rc;
+    }
+    rc = MCA_PML_CALL(send(NULL, 0, MPI_BYTE, peer, tag, MCA_PML_BASE_SEND_STANDARD,
+                           comm));
+    if (MPI_SUCCESS != rc) {
+        ompi_request_free(&req);
+        return rc;
+    }
+    return ompi_request_wait(&req, MPI_STATUS_IGNORE);
+}
+
+static int sc_coll_leaders_barrier(struct ompi_communicator_t *comm,
+                                   const sc_coll_layout_t *L)
+{
+    int dist, peer_os, peer_rank, rc;
+
+    if (!L->is_leader) {
+        return MPI_SUCCESS;
+    }
+    for (dist = 1; dist < L->num_os; dist <<= 1) {
+        peer_os = (int) ((L->leader_rank / (int) L->rph) ^ dist);
+        peer_rank = peer_os * (int) L->rph;
+        rc = sc_coll_sendrecv_zero(comm, peer_rank, MCA_COLL_BASE_TAG_BARRIER);
+        if (MPI_SUCCESS != rc) {
+            return rc;
+        }
+    }
+    return MPI_SUCCESS;
+}
+
+static int sc_coll_leaders_allreduce(void *buf, int count, MPI_Datatype datatype,
+                                     MPI_Op op, struct ompi_communicator_t *comm,
+                                     const sc_coll_layout_t *L)
+{
+    int dist, peer_os, peer_rank, rc, my_os;
+    unsigned char tmp[OMPI_LITHE_SC_COLL_MAX_BYTES];
+    ptrdiff_t span, gap = 0;
+
+    if (!L->is_leader) {
+        return MPI_SUCCESS;
+    }
+    span = opal_datatype_span(&datatype->super, count, &gap);
+    if (span <= 0 || (size_t) span > OMPI_LITHE_SC_COLL_MAX_BYTES) {
+        return OMPI_ERR_NOT_AVAILABLE;
+    }
+    (void) gap;
+    my_os = L->leader_rank / (int) L->rph;
+    for (dist = 1; dist < L->num_os; dist <<= 1) {
+        peer_os = my_os ^ dist;
+        peer_rank = peer_os * (int) L->rph;
+        rc = ompi_coll_base_sendrecv_actual(buf, count, datatype, peer_rank,
+                                            MCA_COLL_BASE_TAG_ALLREDUCE, tmp,
+                                            count, datatype, peer_rank,
+                                            MCA_COLL_BASE_TAG_ALLREDUCE, comm,
+                                            MPI_STATUS_IGNORE);
+        if (MPI_SUCCESS != rc) {
+            return rc;
+        }
+        /* Keep reduce order stable: lower OS applies first (like RD). */
+        if (my_os < peer_os) {
+            ompi_op_reduce(op, buf, tmp, count, datatype);
+            memcpy(buf, tmp, (size_t) span);
+        } else {
+            ompi_op_reduce(op, tmp, buf, count, datatype);
+        }
+    }
+    return MPI_SUCCESS;
 }
 
 static int sc_coll_ensure_arena(size_t nbytes)
@@ -191,7 +326,7 @@ static int sc_coll_ensure_arena(size_t nbytes)
     return OMPI_SUCCESS;
 }
 
-static void sc_coll_ticket_barrier(int size)
+static void sc_coll_ticket_barrier(int size, int with_progress)
 {
     int32_t ticket, goal, cur;
     unsigned int spin = 0;
@@ -207,15 +342,20 @@ static void sc_coll_ticket_barrier(int size)
             break;
         }
         /*
-         * Spin only (no yield). Pairwise stragglers are handled by
-         * single-OS OMPI_MCA_opal_max_thread_in_progress=RPH (no cond_wait)
-         * plus SC spin-without-park in wait_sync — not by yielding here.
-         * Yield-on-runnable thrashed against HELPER harts and hung P1K4
-         * flat coll after pairwise OK under MTP=RPH.
+         * Single-OS: spin only (no yield). Pairwise stragglers use MTP=RPH
+         * + SC spin-without-park — yield here hung P1K4 under MTP=RPH.
+         *
+         * Multi-OS: non-leaders wait here while the leader does cross-OS
+         * Sendrecv; without opal_progress the shared CQ park starves (~10×
+         * P2K2 regression). Pump progress every spin; still no context_yield.
          */
+        /* Throttle progress: every-spin opal_progress taxed P2K2 ~10×. */
+        if (with_progress && (0 == (spin & 63U))) {
+            (void) opal_progress();
+        }
 #if HAVE_LITHE
         cpu_relax();
-        (void) spin;
+        spin++;
 #else
         (void) spin;
         break;
@@ -226,16 +366,26 @@ static void sc_coll_ticket_barrier(int size)
 
 int ompi_lithe_hosted_sc_coll_barrier(MPI_Comm comm)
 {
-    int size;
+    sc_coll_layout_t L;
+    int rc;
 
-    if (!sc_flat_coll_enabled() || !sc_coll_single_os_intra(comm)) {
+    if (!sc_flat_coll_enabled() || !sc_coll_layout(comm, &L)) {
         return OMPI_ERR_NOT_AVAILABLE;
     }
-    size = ompi_comm_size(comm);
     if (OMPI_SUCCESS != sc_coll_ensure_arena(1)) {
         return OMPI_ERR_NOT_AVAILABLE;
     }
-    sc_coll_ticket_barrier(size);
+    if (L.single_os) {
+        sc_coll_ticket_barrier(L.size, 0);
+        return MPI_SUCCESS;
+    }
+    /* Multi-OS hybrid: local arrive → leader cross-OS sync → local release. */
+    sc_coll_ticket_barrier((int) L.rph, 1);
+    rc = sc_coll_leaders_barrier(comm, &L);
+    if (MPI_SUCCESS != rc) {
+        return rc;
+    }
+    sc_coll_ticket_barrier((int) L.rph, 1);
     return MPI_SUCCESS;
 }
 
@@ -243,19 +393,18 @@ int ompi_lithe_hosted_sc_coll_allreduce(const void *sendbuf, void *recvbuf,
                                         int count, MPI_Datatype datatype,
                                         MPI_Op op, MPI_Comm comm)
 {
-    int size, rank, r, ret;
+    sc_coll_layout_t L;
+    int r, ret, base;
     ptrdiff_t span, gap = 0;
     const void *src;
     void *acc;
 
-    if (!sc_flat_coll_enabled() || !sc_coll_single_os_intra(comm)) {
+    if (!sc_flat_coll_enabled() || !sc_coll_layout(comm, &L)) {
         return OMPI_ERR_NOT_AVAILABLE;
     }
     if (MPI_OP_NULL == op || NULL == datatype) {
         return OMPI_ERR_NOT_AVAILABLE;
     }
-    size = ompi_comm_size(comm);
-    rank = ompi_comm_rank(comm);
     span = opal_datatype_span(&datatype->super, count, &gap);
     if (span <= 0 || (size_t) span > OMPI_LITHE_SC_COLL_MAX_BYTES) {
         return OMPI_ERR_NOT_AVAILABLE;
@@ -268,25 +417,59 @@ int ompi_lithe_hosted_sc_coll_allreduce(const void *sendbuf, void *recvbuf,
     src = (MPI_IN_PLACE == sendbuf) ? recvbuf : sendbuf;
     (void) gap;
     ret = ompi_datatype_copy_content_same_ddt(datatype, count,
-                                              (char *) sc_coll.slots[rank],
+                                              (char *) sc_coll.slots[L.rank],
                                               (char *) src);
     if (ret < 0) {
         return OMPI_ERR_NOT_AVAILABLE;
     }
     opal_atomic_wmb();
-    sc_coll_ticket_barrier(size);
 
-    /* Local reduce of all published slots. */
-    acc = recvbuf;
-    ret = ompi_datatype_copy_content_same_ddt(datatype, count, (char *) acc,
-                                              (char *) sc_coll.slots[0]);
+    if (L.single_os) {
+        sc_coll_ticket_barrier(L.size, 0);
+        acc = recvbuf;
+        ret = ompi_datatype_copy_content_same_ddt(datatype, count, (char *) acc,
+                                                  (char *) sc_coll.slots[0]);
+        if (ret < 0) {
+            return OMPI_ERROR;
+        }
+        for (r = 1; r < L.size; ++r) {
+            ompi_op_reduce(op, sc_coll.slots[r], acc, count, datatype);
+        }
+        sc_coll_ticket_barrier(L.size, 0);
+        return MPI_SUCCESS;
+    }
+
+    /* Multi-OS: local reduce → leader RD → broadcast via leader slot. */
+    sc_coll_ticket_barrier((int) L.rph, 1);
+    if (L.is_leader) {
+        base = L.leader_rank;
+        acc = recvbuf;
+        ret = ompi_datatype_copy_content_same_ddt(datatype, count, (char *) acc,
+                                                  (char *) sc_coll.slots[base]);
+        if (ret < 0) {
+            return OMPI_ERROR;
+        }
+        for (r = 1; r < (int) L.rph; ++r) {
+            ompi_op_reduce(op, sc_coll.slots[base + r], acc, count, datatype);
+        }
+        ret = sc_coll_leaders_allreduce(acc, count, datatype, op, comm, &L);
+        if (MPI_SUCCESS != ret) {
+            return ret;
+        }
+        ret = ompi_datatype_copy_content_same_ddt(datatype, count,
+                                                  (char *) sc_coll.slots[base],
+                                                  (char *) acc);
+        if (ret < 0) {
+            return OMPI_ERROR;
+        }
+        opal_atomic_wmb();
+    }
+    sc_coll_ticket_barrier((int) L.rph, 1);
+    ret = ompi_datatype_copy_content_same_ddt(datatype, count, (char *) recvbuf,
+                                              (char *) sc_coll.slots[L.leader_rank]);
     if (ret < 0) {
         return OMPI_ERROR;
     }
-    for (r = 1; r < size; ++r) {
-        ompi_op_reduce(op, sc_coll.slots[r], acc, count, datatype);
-    }
-    /* Epilogue: do not let a fast rank overwrite slots before peers finish. */
-    sc_coll_ticket_barrier(size);
+    sc_coll_ticket_barrier((int) L.rph, 1);
     return MPI_SUCCESS;
 }

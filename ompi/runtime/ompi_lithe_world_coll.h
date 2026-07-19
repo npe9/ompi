@@ -14,8 +14,9 @@
  * Lithe-backed logical ranks share one OS process (OMPI_LITHE_CONTEXT_LOCAL_PROC).
  * Currently: MPI_Barrier, MPI_Allreduce, MPI_Reduce (extend as hosted apps need).
  *
- * Also: same-OS flat Barrier/Allreduce for hosted Lithe (see
- * ompi_lithe_hosted_sc_coll_*); disable with LITHE_HOSTED_SC_FLAT_COLL=0.
+ * Also: hosted flat Barrier/Allreduce (same-OS ticket + multi-OS hybrid
+ * local/leader RD); see ompi_lithe_hosted_sc_coll_*. Disable with
+ * LITHE_HOSTED_SC_FLAT_COLL=0.
  */
 
 #ifndef OMPI_RUNTIME_OMPI_LITHE_WORLD_COLL_H
@@ -32,9 +33,9 @@ void ompi_lithe_world_coll_mpi_finalize_hook(void);
 void ompi_lithe_world_coll_lock(MPI_Comm comm);
 void ompi_lithe_world_coll_unlock(MPI_Comm comm);
 
-/** Same-OS flat barrier; OMPI_ERR_NOT_AVAILABLE → use RD. */
+/** Hosted flat/hybrid barrier; OMPI_ERR_NOT_AVAILABLE → use RD. */
 int ompi_lithe_hosted_sc_coll_barrier(MPI_Comm comm);
-/** Same-OS flat allreduce; OMPI_ERR_NOT_AVAILABLE → use RD. */
+/** Hosted flat/hybrid allreduce; OMPI_ERR_NOT_AVAILABLE → use RD. */
 int ompi_lithe_hosted_sc_coll_allreduce(const void *sendbuf, void *recvbuf,
                                         int count, MPI_Datatype datatype,
                                         MPI_Op op, MPI_Comm comm);
