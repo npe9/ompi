@@ -24,6 +24,7 @@
 #include "opal/util/output.h"
 #include "opal/util/proc.h"
 
+#include <lithe/fork_join_sched.h>
 #include <lithe/lithe.h>
 #include <stdlib.h>
 #include <string.h>
@@ -661,16 +662,20 @@ int ompi_mtl_ofi_hosted_sc_try_park_pending(void)
     ompi_mtl_ofi_hosted_sc_slot_t *slot;
     ompi_mtl_ofi_hosted_sc_posted_t *pr;
     int pending = 0;
+    int ofi_needed = 0;
+    int multi_os;
     unsigned int i, spins;
 
-    /* Multi-OS: never suppress CQ park here (park+pump / cross-OS OFI).
-     * Pending same-OS SC on multi-OS still completes via peer send match;
-     * returning 1 while an OFI recv is outstanding hung P2K2. */
-    if (!sc_enabled || sc_multi_os_world()) {
+    if (!sc_enabled) {
         return 0;
     }
+    multi_os = sc_multi_os_world();
     slot = sc_slot_for_vpid(opal_proc_local_get()->proc_name.vpid);
     if (NULL == slot) {
+        if (multi_os) {
+            /* Multi-OS without a slot: do not suppress CQ park. */
+            return 0;
+        }
         for (i = 0; i < 32u; i++) {
             cpu_relax();
         }
@@ -681,10 +686,40 @@ int ompi_mtl_ofi_hosted_sc_try_park_pending(void)
     OPAL_LIST_FOREACH (pr, &slot->posted, ompi_mtl_ofi_hosted_sc_posted_t) {
         if (!pr->req->req_started) {
             pending = 1;
-            break;
+            /* Dual / fi_trecv posted: completion may arrive on the CQ. */
+            if (pr->ofi_dual || pr->ofi_posted) {
+                ofi_needed = 1;
+            }
         }
     }
     opal_mutex_unlock(&slot->lock);
+
+    /*
+     * Multi-OS: only suppress CQ park for *pure* same-OS SC waits.
+     * Blanket return-1 with any pending SC hung P2K2 when an OFI recv was
+     * also outstanding. Pure SC (ofi_dual=ofi_posted=0) spins so wait_sync
+     * does not CQ-park on memcpy matches. P2K4 residual was structural RD
+     * (fixed by hybrid coll); this path still avoids wasted CQ parks on
+     * same-OS rounds. No pending SC → return 0 so cross-OS OFI can CQ-park.
+     */
+    if (multi_os) {
+        if (!pending || ofi_needed) {
+            return 0;
+        }
+        /*
+         * Pure SC: spin-suppress CQ park. MTP=1: must occasionally yield so
+         * the peer can post/match (no-yield hung P2K2 collectives after
+         * pairwise). Throttle yield — every-spin yield taxed P2K2 median.
+         */
+        spins = 128u;
+        for (i = 0; i < spins; i++) {
+            cpu_relax();
+            if (0 == (i & 63u) && lithe_fork_join_should_yield_to_runnable()) {
+                lithe_context_yield();
+            }
+        }
+        return 1;
+    }
 
     /*
      * Single-OS: always spin-suppress yield/CQ-park in wait_sync. Gaps

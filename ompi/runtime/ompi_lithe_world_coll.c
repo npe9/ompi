@@ -107,11 +107,12 @@ void ompi_lithe_world_coll_unlock(MPI_Comm comm)
  *
  * Multi-OS (P2K*): hybrid — local ticket barrier/reduce among the RPH
  * co-resident ranks, then leader-only recursive-doubling Sendrecv across OS
- * processes (1 cross-OS round for P=2). Non-leaders spin on the next local
- * ticket (leader self-progresses PML). Regular packing only: size % RPH == 0
- * and contiguous vpids per OS.
+ * processes (1 cross-OS round for P=2). Non-leaders yield frequently so the
+ * leader gets a hart under MTP=1; rare opal_progress assists CQ.
+ * Auto-on when RPH>=4 (unset LITHE_HOSTED_SC_FLAT_MULTI_OS); RPH=2 stays RD
+ * (P2K2 ~15–18µs). Force with =1 / disable with =0.
  *
- * LITHE_HOSTED_SC_FLAT_COLL=0 disables (fallback RD).
+ * LITHE_HOSTED_SC_FLAT_COLL=0 disables all flat/hybrid (fallback RD).
  */
 #ifndef OMPI_LITHE_SC_COLL_MAX_RANKS
 #define OMPI_LITHE_SC_COLL_MAX_RANKS 64
@@ -212,15 +213,26 @@ static bool sc_coll_layout(struct ompi_communicator_t *comm, sc_coll_layout_t *L
         }
     }
     /*
-     * Multi-OS hybrid (local ticket + leader RD) is OPT-IN only.
-     * Default keeps RD+SC/OFI: P2K2 ~15µs held; P2K4 ~170µs.
-     * LITHE_HOSTED_SC_FLAT_MULTI_OS=1 enables hybrid — can occasionally hit
-     * ~20µs on P2K8 but median regresses (P2K2 ~250µs, P2K4 ~200µs+) until
-     * cross-OS leader progress/CQ park is sorted. Power-of-two OS count.
+     * Multi-OS hybrid (local ticket + leader RD):
+     * - LITHE_HOSTED_SC_FLAT_MULTI_OS=1 → force on
+     * - LITHE_HOSTED_SC_FLAT_MULTI_OS=0 → force off
+     * - unset: auto-on when RPH>=4 (P2K4/P2K8); keep RD for P2K2 (RPH=2)
+     *   where hybrid previously regressed median (~250µs vs ~15µs RD).
+     * Power-of-two OS count required for leader RD.
      */
     if (!L->single_os) {
         const char *mos = getenv("LITHE_HOSTED_SC_FLAT_MULTI_OS");
-        if (NULL == mos || '1' != mos[0] || '\0' != mos[1]) {
+        int enable = 0;
+        if (NULL != mos) {
+            if ('1' == mos[0] && '\0' == mos[1]) {
+                enable = 1;
+            } else if ('0' == mos[0] && '\0' == mos[1]) {
+                enable = 0;
+            }
+        } else if (L->rph >= 4UL) {
+            enable = 1;
+        }
+        if (!enable) {
             return false;
         }
         if (L->num_os < 2 || (L->num_os & (L->num_os - 1)) != 0) {
@@ -343,9 +355,12 @@ static void sc_coll_ticket_barrier(int size, int with_progress)
             break;
         }
         /*
-         * Multi-OS: non-leaders wait here while the leader does cross-OS
-         * Sendrecv; without opal_progress the shared CQ park starves (~10×
-         * P2K2 regression). Throttle: every-spin opal_progress taxed P2K2.
+         * Multi-OS hybrid (with_progress): non-leaders wait while the leader
+         * does cross-OS Sendrecv. MTP=1 puts the progress manager on one
+         * context — if a non-leader holds the only hart and only cpu_relax'es,
+         * the leader never runs (hang). Prefer frequent yield so the leader
+         * gets a hart; rare opal_progress assists CQ without the every-64
+         * progress tax that pushed P2K4 hybrid median to ~200µs+.
          *
          * Single-OS: prefer cpu_relax, but if a peer is RUNNABLE (e.g. still
          * in pairwise RD-SUM after we arrived), donate the hart. With
@@ -355,13 +370,18 @@ static void sc_coll_ticket_barrier(int size, int with_progress)
          * arrived (ticket taken); unconditional yield-before-arrive hung
          * P1K4 under MTP=RPH.
          */
-        if (with_progress && (0 == (spin & 63U))) {
-            (void) opal_progress();
-        }
 #if HAVE_LITHE
-        if (!with_progress && lithe_fork_join_should_yield_to_runnable()) {
+        if (with_progress) {
+            if (0 == (spin & 15U)) {
+                lithe_context_yield();
+            } else if (0 == (spin & 127U)) {
+                (void) opal_progress();
+            } else {
+                cpu_relax();
+            }
+        } else if (lithe_fork_join_should_yield_to_runnable()) {
             lithe_context_yield();
-        } else if (!with_progress && lithe_fork_join_current_runnable_count() > 0) {
+        } else if (lithe_fork_join_current_runnable_count() > 0) {
             /* Spare-hart soft_cap: should_yield false but peer needs a hart. */
             lithe_context_yield();
         } else {
@@ -369,6 +389,9 @@ static void sc_coll_ticket_barrier(int size, int with_progress)
         }
         spin++;
 #else
+        if (with_progress && (0 == (spin & 63U))) {
+            (void) opal_progress();
+        }
         (void) spin;
         break;
 #endif
