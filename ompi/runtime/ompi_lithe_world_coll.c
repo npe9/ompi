@@ -455,8 +455,10 @@ static void sc_coll_ticket_barrier(int size, int with_progress)
              * Non-leaders wait while leader does cross-OS Sendrecv.
              * MTP=1: yield every 16 spins so the sole progress manager
              * (often the leader) gets a hart.
-             * MTP>=2 (multi-node default): yield only when a peer is
-             * RUNNABLE — every-16 yield taxed P2N2K4 ~+30µs vs should_yield.
+             * MTP>=2 (multi-node default): yield when should_yield OR a peer
+             * is RUNNABLE — every-16 yield taxed P2N2K4 ~+30µs, but
+             * should_yield-only stranded pairwise RD-SUM (7/8 OK, one
+             * waiter never got a hart while ticket peers cpu_relax'd).
              * Do NOT call opal_progress here (P2K4 ~200–400µs floor).
              */
             static int mtp_cached = -1;
@@ -466,7 +468,8 @@ static void sc_coll_ticket_barrier(int size, int with_progress)
                 mtp_cached = (m >= 2) ? 2 : 1;
             }
             if (mtp_cached >= 2) {
-                if (lithe_fork_join_should_yield_to_runnable()) {
+                if (lithe_fork_join_should_yield_to_runnable() ||
+                    lithe_fork_join_current_runnable_count() > 0) {
                     lithe_context_yield();
                 } else {
                     cpu_relax();

@@ -162,20 +162,18 @@ check_status:
                 }
                 if (no_cq_park < 0) {
                     /*
-                     * Multi-node nopump (LITHE_HOSTED_PUMP=0) or explicit
-                     * NO_CQ_PARK: never opal_progress_block — all waiters
-                     * parked with MTP=1 never wake (pre-pairwise hang).
-                     * Yield-to-runnable then cpu_relax instead.
-                     * SINGLE_OS stays cpu_relax-only (never yield) — see
-                     * P1K8/P1K16 stranding note above.
+                     * Opt-in LITHE_MTL_OFI_NO_CQ_PARK=1 only (launcher sets
+                     * this for multi-node nopump). Do NOT key off
+                     * LITHE_HOSTED_PUMP=0 — single-node P2K4 pure-park also
+                     * leaves PUMP unset/0 but still needs CQ park for
+                     * cross-OS (~30µs); coupling PUMP=0→no_cq_park floored
+                     * P2K4 at ~70µs when the env leaked.
+                     * Never opal_progress_block under NO_CQ_PARK: all waiters
+                     * parked with low MTP never wake (pre-pairwise hang).
+                     * SINGLE_OS stays cpu_relax-only — see P1K8/P1K16 note.
                      */
                     const char *n = getenv("LITHE_MTL_OFI_NO_CQ_PARK");
-                    const char *p = getenv("LITHE_HOSTED_PUMP");
-                    no_cq_park =
-                        ((n && n[0] == '1' && n[1] == '\0') ||
-                         (p && p[0] == '0' && p[1] == '\0'))
-                            ? 1
-                            : 0;
+                    no_cq_park = (n && n[0] == '1' && n[1] == '\0') ? 1 : 0;
                 }
                 if (single_os) {
                     cpu_relax();
