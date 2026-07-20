@@ -372,10 +372,12 @@ static void sc_coll_ticket_barrier(int size, int with_progress)
          */
 #if HAVE_LITHE
         if (with_progress) {
+            /* Non-leaders: yield often so the leader's Sendrecv gets a hart
+             * under MTP=1. Do NOT call opal_progress here — rare progress
+             * from waiters contended with the leader and floored whole-run
+             * P2K4 means near ~200–400µs. Leader's PML wait_sync progresses. */
             if (0 == (spin & 15U)) {
                 lithe_context_yield();
-            } else if (0 == (spin & 127U)) {
-                (void) opal_progress();
             } else {
                 cpu_relax();
             }
