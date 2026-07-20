@@ -19,6 +19,7 @@
 #include "opal/mca/threads/wait_sync.h"
 
 #include <stdlib.h>
+#include <time.h>
 
 #if HAVE_LITHE
 #include <lithe/fork_join_sched.h>
@@ -154,12 +155,50 @@ check_status:
                 /* SC spin handled this iter; do not yield/CQ-park. */
             } else {
                 static int single_os = -1;
+                static int no_cq_park = -1;
                 if (single_os < 0) {
                     const char *e = getenv("LITHE_MTL_OFI_SINGLE_OS");
                     single_os = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
                 }
+                if (no_cq_park < 0) {
+                    /*
+                     * Multi-node nopump (LITHE_HOSTED_PUMP=0) or explicit
+                     * NO_CQ_PARK: never opal_progress_block — all waiters
+                     * parked with MTP=1 never wake (pre-pairwise hang).
+                     * Yield-to-runnable then cpu_relax instead.
+                     * SINGLE_OS stays cpu_relax-only (never yield) — see
+                     * P1K8/P1K16 stranding note above.
+                     */
+                    const char *n = getenv("LITHE_MTL_OFI_NO_CQ_PARK");
+                    const char *p = getenv("LITHE_HOSTED_PUMP");
+                    no_cq_park =
+                        ((n && n[0] == '1' && n[1] == '\0') ||
+                         (p && p[0] == '0' && p[1] == '\0'))
+                            ? 1
+                            : 0;
+                }
                 if (single_os) {
                     cpu_relax();
+                } else if (no_cq_park) {
+                    /*
+                     * Nopump multi-node: pure userspace spin can starve cxi
+                     * CQ delivery. Occasional 5µs clock_nanosleep gives
+                     * kernel entry without the 50µs host pump (med
+                     * ~130–800µs). Yield when should_yield or runnable_count>0
+                     * (P1K8 spare-hart cure). Do NOT unconditional-yield
+                     * every 256 — ab9b that raised hang rate 2/20→5/20.
+                     */
+                    static unsigned idle_iters = 0;
+                    if (lithe_fork_join_should_yield_to_runnable() ||
+                        lithe_fork_join_current_runnable_count() > 0) {
+                        lithe_context_yield();
+                        idle_iters = 0;
+                    } else if ((++idle_iters & 2047U) == 0U) {
+                        struct timespec req = {.tv_sec = 0, .tv_nsec = 5000L};
+                        (void) clock_nanosleep(CLOCK_MONOTONIC, 0, &req, NULL);
+                    } else {
+                        cpu_relax();
+                    }
                 } else if (lithe_fork_join_should_yield_to_runnable()) {
                     lithe_context_yield();
                 } else {
