@@ -710,14 +710,23 @@ int ompi_mtl_ofi_hosted_sc_try_park_pending(void)
          * Pure SC: spin-suppress CQ park. MTP=1: must occasionally yield so
          * the peer can post/match (no-yield hung P2K2 collectives after
          * pairwise). Throttle yield — every-spin yield taxed P2K2 median.
+         *
+         * Also yield when runnable_count>0 (should_yield alone misses
+         * soft_cap spare: owned<RPH with RUNNABLE peers). End with one
+         * unconditional yield so all-RUNNING waiters rotate — P2N2K4
+         * dist=1 same-OS SC pw=0 hangs when every rank SC-spins with r=0
+         * and nobody posts (Flux EC=142).
          */
         spins = 128u;
         for (i = 0; i < spins; i++) {
             cpu_relax();
-            if (0 == (i & 63u) && lithe_fork_join_should_yield_to_runnable()) {
+            if (0 == (i & 63u) &&
+                (lithe_fork_join_should_yield_to_runnable() ||
+                 lithe_fork_join_current_runnable_count() > 0)) {
                 lithe_context_yield();
             }
         }
+        lithe_context_yield();
         return 1;
     }
 

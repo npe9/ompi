@@ -125,6 +125,29 @@ check_status:
     opal_thread_internal_mutex_unlock(&sync->lock);
 
     OPAL_THREAD_ADD_FETCH32(&num_thread_in_progress, 1);
+#if HAVE_LITHE
+    /*
+     * Per-waiter nopump idle cadence (see no_cq_park branch). Must NOT be a
+     * function-static: hosted multi-context shares one OS process, so a
+     * static counter is raced/reset across peers and starves cxi nanosleep.
+     */
+    unsigned lithe_nocq_idle_iters = 0;
+    static int lithe_ws_single_os = -1;
+    static int lithe_ws_no_cq_park = -1;
+    if (lithe_ws_single_os < 0) {
+        const char *e = getenv("LITHE_MTL_OFI_SINGLE_OS");
+        lithe_ws_single_os = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
+    }
+    if (lithe_ws_no_cq_park < 0) {
+        /*
+         * Opt-in LITHE_MTL_OFI_NO_CQ_PARK=1 only (launcher sets this for
+         * multi-node nopump). Do NOT key off LITHE_HOSTED_PUMP=0 — that
+         * coupling floored single-node P2K4 at ~70µs when the env leaked.
+         */
+        const char *n = getenv("LITHE_MTL_OFI_NO_CQ_PARK");
+        lithe_ws_no_cq_park = (n && n[0] == '1' && n[1] == '\0') ? 1 : 0;
+    }
+#endif
     while (sync->count > 0) { /* progress till completion */
         /* don't progress with the sync lock locked or you'll deadlock */
         int events = opal_progress();
@@ -150,58 +173,44 @@ check_status:
              * Single-OS (LITHE_MTL_OFI_SINGLE_OS=1): never yield — peers may
              * already be in flat Barrier spin; yielding strands this waiter
              * when soft_cap spare harts do not show up (P1K8/P1K16).
+             *
+             * Multi-OS: SC park returning 1 must NOT skip yield-to-runnable.
+             * P2N2K4 dist=1 is same-OS SC; waiters that SC-spin while a peer
+             * is still RUNNABLE (has not posted Sendrecv) never donate a hart
+             * → pw=0 Flux EC=142. Keep SINGLE_OS cpu_relax-only.
              */
             if (opal_progress_sc_park()) {
-                /* SC spin handled this iter; do not yield/CQ-park. */
-            } else {
-                static int single_os = -1;
-                static int no_cq_park = -1;
-                if (single_os < 0) {
-                    const char *e = getenv("LITHE_MTL_OFI_SINGLE_OS");
-                    single_os = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
-                }
-                if (no_cq_park < 0) {
-                    /*
-                     * Opt-in LITHE_MTL_OFI_NO_CQ_PARK=1 only (launcher sets
-                     * this for multi-node nopump). Do NOT key off
-                     * LITHE_HOSTED_PUMP=0 — single-node P2K4 pure-park also
-                     * leaves PUMP unset/0 but still needs CQ park for
-                     * cross-OS (~30µs); coupling PUMP=0→no_cq_park floored
-                     * P2K4 at ~70µs when the env leaked.
-                     * Never opal_progress_block under NO_CQ_PARK: all waiters
-                     * parked with low MTP never wake (pre-pairwise hang).
-                     * SINGLE_OS stays cpu_relax-only — see P1K8/P1K16 note.
-                     */
-                    const char *n = getenv("LITHE_MTL_OFI_NO_CQ_PARK");
-                    no_cq_park = (n && n[0] == '1' && n[1] == '\0') ? 1 : 0;
-                }
-                if (single_os) {
-                    cpu_relax();
-                } else if (no_cq_park) {
-                    /*
-                     * Nopump multi-node: pure userspace spin can starve cxi
-                     * CQ delivery. Occasional 5µs clock_nanosleep gives
-                     * kernel entry without the 50µs host pump (med
-                     * ~130–800µs). Yield when should_yield or runnable_count>0
-                     * (P1K8 spare-hart cure). Do NOT unconditional-yield
-                     * every 256 — ab9b that raised hang rate 2/20→5/20.
-                     */
-                    static unsigned idle_iters = 0;
-                    if (lithe_fork_join_should_yield_to_runnable() ||
-                        lithe_fork_join_current_runnable_count() > 0) {
-                        lithe_context_yield();
-                        idle_iters = 0;
-                    } else if ((++idle_iters & 2047U) == 0U) {
-                        struct timespec req = {.tv_sec = 0, .tv_nsec = 5000L};
-                        (void) clock_nanosleep(CLOCK_MONOTONIC, 0, &req, NULL);
-                    } else {
-                        cpu_relax();
-                    }
-                } else if (lithe_fork_join_should_yield_to_runnable()) {
+                if (!lithe_ws_single_os &&
+                    (lithe_fork_join_should_yield_to_runnable() ||
+                     lithe_fork_join_current_runnable_count() > 0)) {
                     lithe_context_yield();
-                } else {
-                    (void) opal_progress_block();
+                    lithe_nocq_idle_iters = 0;
                 }
+            } else if (lithe_ws_single_os) {
+                cpu_relax();
+            } else if (lithe_ws_no_cq_park) {
+                /*
+                 * Nopump multi-node: pure userspace spin can starve cxi
+                 * CQ delivery. Occasional 5µs clock_nanosleep gives
+                 * kernel entry without the 50µs host pump (med
+                 * ~130–800µs). Yield when should_yield or runnable_count>0
+                 * (P1K8 spare-hart cure). Do NOT unconditional-yield
+                 * every 256 — ab9b that raised hang rate 2/20→5/20.
+                 */
+                if (lithe_fork_join_should_yield_to_runnable() ||
+                    lithe_fork_join_current_runnable_count() > 0) {
+                    lithe_context_yield();
+                    lithe_nocq_idle_iters = 0;
+                } else if ((++lithe_nocq_idle_iters & 2047U) == 0U) {
+                    struct timespec req = {.tv_sec = 0, .tv_nsec = 5000L};
+                    (void) clock_nanosleep(CLOCK_MONOTONIC, 0, &req, NULL);
+                } else {
+                    cpu_relax();
+                }
+            } else if (lithe_fork_join_should_yield_to_runnable()) {
+                lithe_context_yield();
+            } else {
+                (void) opal_progress_block();
             }
         }
 #else
