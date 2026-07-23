@@ -1261,9 +1261,11 @@ ompi_mtl_ofi_ssend_recv(ompi_mtl_ofi_request_t *ack_req,
     {
         fi_addr_t ack_src = *src_addr;
 #if HAVE_LITHE
-        /* Hosted dest-slot demux: directed source addrs are ambiguous on a
-         * shared EP; match the ack by tag (original dest-slot + ack bit). */
-        if (ompi_mtl_ofi.hosted_dst_in_cqd_tag || ompi_mtl_ofi.hosted_multi_ep) {
+        /* Multi regular-EP: acks may arrive from a different peer EP than the
+         * one we sent to; match by tag only. Hosted no-SEP (dst_in_cqd_tag):
+         * keep the ack directed — *src_addr is the peer OS shared-EP address
+         * and the ack tag's dest+src slots alias across >=3 OS processes. */
+        if (ompi_mtl_ofi.hosted_multi_ep) {
             ack_src = ompi_mtl_ofi.any_addr;
         }
 #endif
@@ -2014,14 +2016,23 @@ ompi_mtl_ofi_irecv_generic(struct mca_mtl_base_module_t *mtl,
         if (MPI_ANY_SOURCE != src) {
             ompi_proc = ompi_comm_peer_lookup(comm, src);
             endpoint = ompi_mtl_ofi_get_endpoint(mtl, ompi_proc);
-            /* Multi regular-EP / hosted dest-slot demux: co-resident ranks
-             * share one EP address so directed-recv source fi_addrs are
-             * ambiguous. Use UNSPEC; match by dest-slot tag (+ CQ data). */
+            /* Multi regular-EP demux: co-resident peer EP addresses differ,
+             * but matching is per-EP; keep UNSPEC (opt-in mode). */
             if (!ompi_mtl_ofi.hosted_multi_ep &&
                 !ompi_mtl_ofi.hosted_dst_in_cqd_tag) {
                 remote_addr = fi_rx_addr(endpoint->peer_fiaddr, ctxt_id,
                                          ompi_mtl_ofi.rx_ctx_bits);
             }
+#if HAVE_LITHE
+            else if (ompi_mtl_ofi.hosted_dst_in_cqd_tag) {
+                /* Hosted no-SEP: src-slot tag bits isolate co-resident ranks
+                 * only. With >=3 OS processes, remote peers alias the same
+                 * slot (vpid%RPH), so pin the sending OS process with
+                 * FI_DIRECTED_RECV on its shared-EP address. Regular EP:
+                 * rx_ctx_bits==0 — use peer_fiaddr as-is (no fi_rx_addr). */
+                remote_addr = endpoint->peer_fiaddr;
+            }
+#endif
         }
 
         mtl_ofi_create_recv_tag_CQD(&match_bits, &mask_bits, comm->c_index,
@@ -2331,6 +2342,12 @@ ompi_mtl_ofi_iprobe_generic(struct mca_mtl_base_module_t *mtl,
                 remote_proc = fi_rx_addr(endpoint->peer_fiaddr, ctxt_id,
                                          ompi_mtl_ofi.rx_ctx_bits);
             }
+#if HAVE_LITHE
+            else if (ompi_mtl_ofi.hosted_dst_in_cqd_tag) {
+                /* Hosted no-SEP: pin sending OS process (see irecv). */
+                remote_proc = endpoint->peer_fiaddr;
+            }
+#endif
         }
 
         mtl_ofi_create_recv_tag_CQD(&match_bits, &mask_bits, comm->c_index,
@@ -2439,6 +2456,12 @@ ompi_mtl_ofi_improbe_generic(struct mca_mtl_base_module_t *mtl,
                 remote_proc = fi_rx_addr(endpoint->peer_fiaddr, ctxt_id,
                                          ompi_mtl_ofi.rx_ctx_bits);
             }
+#if HAVE_LITHE
+            else if (ompi_mtl_ofi.hosted_dst_in_cqd_tag) {
+                /* Hosted no-SEP: pin sending OS process (see irecv). */
+                remote_proc = endpoint->peer_fiaddr;
+            }
+#endif
         }
 
         mtl_ofi_create_recv_tag_CQD(&match_bits, &mask_bits, comm->c_index,
