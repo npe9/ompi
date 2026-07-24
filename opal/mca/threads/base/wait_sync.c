@@ -170,24 +170,41 @@ check_status:
              * a later SC park backoff could strand one rank (P1K4 pairwise
              * ~1/10 timeout: three ranks OK, one never finishes RD-SUM).
              *
-             * Single-OS (LITHE_MTL_OFI_SINGLE_OS=1): never yield — peers may
-             * already be in flat Barrier spin; yielding strands this waiter
-             * when soft_cap spare harts do not show up (P1K8/P1K16).
+             * Single-OS (LITHE_MTL_OFI_SINGLE_OS=1): yield ONLY when the
+             * current fork-join sched has queued RUNNABLE contexts. That is
+             * strictly productive multiplexing: yield re-enqueues this
+             * waiter and the same hart immediately dequeues from its own
+             * queue (peer or self) — no parent hart grant involved, so the
+             * old "yield strands the waiter" hazard (speculative
+             * should_yield with runnable==0, P1K8/P1K16) cannot happen.
+             * Without this, a spinning waiter hoards the last busy hart
+             * forever while the peer that must post its Sendrecv sits
+             * RUNNABLE with a drifted harts_needed ledger (see
+             * fork_join_sched.c context_block NOTE) — P1K4 nx=80
+             * make_local/CG stall, eu-stack: one hart in sc_try_park_pending,
+             * every other vcore parked at vcore_entry_gate.
              *
              * Multi-OS: SC park returning 1 must NOT skip yield-to-runnable.
              * P2N2K4 dist=1 is same-OS SC; waiters that SC-spin while a peer
              * is still RUNNABLE (has not posted Sendrecv) never donate a hart
-             * → pw=0 Flux EC=142. Keep SINGLE_OS cpu_relax-only.
+             * → pw=0 Flux EC=142.
              */
             if (opal_progress_sc_park()) {
-                if (!lithe_ws_single_os &&
-                    (lithe_fork_join_should_yield_to_runnable() ||
-                     lithe_fork_join_current_runnable_count() > 0)) {
+                if (lithe_ws_single_os) {
+                    if (lithe_fork_join_current_runnable_count() > 0) {
+                        lithe_context_yield();
+                    }
+                } else if (lithe_fork_join_should_yield_to_runnable() ||
+                           lithe_fork_join_current_runnable_count() > 0) {
                     lithe_context_yield();
                     lithe_nocq_idle_iters = 0;
                 }
             } else if (lithe_ws_single_os) {
-                cpu_relax();
+                if (lithe_fork_join_current_runnable_count() > 0) {
+                    lithe_context_yield();
+                } else {
+                    cpu_relax();
+                }
             } else if (lithe_ws_no_cq_park) {
                 /*
                  * Nopump multi-node: pure userspace spin can starve cxi

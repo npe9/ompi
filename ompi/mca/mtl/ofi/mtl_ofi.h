@@ -264,10 +264,17 @@ mtl_ofi_cq_context_enter_multicontext(int ctxt_id)
 {
     /* Spin on lithe opal_mutex_trylock + scarcity yield — NOT
      * opal_mutex_atomic_trylock (different lock word) and NOT blocking
-     * opal_mutex_lock (parks the uthread for a short fi_cq_read section). */
+     * opal_mutex_lock (parks the uthread for a short fi_cq_read section).
+     * Also yield when the current FJS has queued RUNNABLE contexts:
+     * should_yield alone returns false at owned < soft_cap, but with a
+     * drifted harts_needed ledger no further grant arrives and the lock
+     * owner may itself be a descheduled RUNNABLE context — spinning here
+     * then deadlocks the last busy harts (P1K4 nx=80 CG stall). */
     unsigned spin = 0;
     while (0 != opal_mutex_trylock(&ompi_mtl_ofi.ofi_ctxt[ctxt_id].context_lock)) {
-        if ((++spin & 63u) == 0u && lithe_fork_join_should_yield_to_runnable()) {
+        if ((++spin & 63u) == 0u &&
+            (lithe_fork_join_should_yield_to_runnable() ||
+             lithe_fork_join_current_runnable_count() > 0)) {
             lithe_context_yield();
         } else {
             cpu_relax();
