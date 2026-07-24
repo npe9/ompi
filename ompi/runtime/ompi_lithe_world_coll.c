@@ -155,9 +155,18 @@ typedef struct {
 
 static sc_coll_gate_t sc_gate;
 
-static int sc_coll_gate_wanted(void)
+/*
+ * Gate (non-leaders condvar-park during leader RD):
+ * Opt-in LITHE_HOSTED_SC_COLL_GATE=1 only. Default OFF — on P2N2K4 park
+ * added ~30µs + hang risk; on P4N2K4 auto-on also inflated DOT (~0.035 vs
+ * ~0.033) in early §1.3h samples. P>=4 hart/CQ starve is handled by
+ * with_progress==2 (periodic yield + rare opal_progress) and by routing
+ * PRE_INIT off world Allreduce in miniFE.
+ */
+static int sc_coll_gate_wanted(int num_os)
 {
     static int v = -1;
+    (void) num_os;
     if (v < 0) {
         const char *e = getenv("LITHE_HOSTED_SC_COLL_GATE");
         v = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
@@ -418,6 +427,14 @@ static int sc_coll_ensure_arena(size_t nbytes)
     return OMPI_SUCCESS;
 }
 
+/*
+ * with_progress:
+ *   0 — single-OS (yield only to RUNNABLE peers)
+ *   1 — multi-OS P=2 (MTP-aware yield; no opal_progress — P2K4 floor)
+ *   2 — multi-OS P>=4 (P4N2K4): also periodic yield when leader is in
+ *       NO_CQ nanosleep (not RUNNABLE) so waiters do not hoard harts;
+ *       rare opal_progress assists same-OS CQ without the every-64 tax.
+ */
 static void sc_coll_ticket_barrier(int size, int with_progress)
 {
     int32_t ticket, goal, cur;
@@ -459,7 +476,12 @@ static void sc_coll_ticket_barrier(int size, int with_progress)
              * is RUNNABLE — every-16 yield taxed P2N2K4 ~+30µs, but
              * should_yield-only stranded pairwise RD-SUM (7/8 OK, one
              * waiter never got a hart while ticket peers cpu_relax'd).
-             * Do NOT call opal_progress here (P2K4 ~200–400µs floor).
+             * Do NOT call opal_progress on P=2 (P2K4 ~200–400µs floor).
+             *
+             * P>=4 (with_progress==2): leader often sits in NO_CQ
+             * clock_nanosleep — not RUNNABLE — so runnable-only yield
+             * lets waiters cpu_relax-hoard harts (DOT inflate + PRE_INIT
+             * ec142). Yield every 64 spins; opal_progress every 256.
              */
             static int mtp_cached = -1;
             if (mtp_cached < 0) {
@@ -467,7 +489,17 @@ static void sc_coll_ticket_barrier(int size, int with_progress)
                 int m = (me && *me) ? atoi(me) : 1;
                 mtp_cached = (m >= 2) ? 2 : 1;
             }
-            if (mtp_cached >= 2) {
+            if (with_progress >= 2) {
+                if (lithe_fork_join_should_yield_to_runnable() ||
+                    lithe_fork_join_current_runnable_count() > 0 ||
+                    0 == (spin & 63U)) {
+                    lithe_context_yield();
+                } else if (0 == (spin & 255U)) {
+                    (void) opal_progress();
+                } else {
+                    cpu_relax();
+                }
+            } else if (mtp_cached >= 2) {
                 if (lithe_fork_join_should_yield_to_runnable() ||
                     lithe_fork_join_current_runnable_count() > 0) {
                     lithe_context_yield();
@@ -499,6 +531,12 @@ static void sc_coll_ticket_barrier(int size, int with_progress)
     opal_atomic_rmb();
 }
 
+/* Progress mode for multi-OS hybrid ticket waits (see sc_coll_ticket_barrier). */
+static int sc_coll_multi_os_progress_mode(const sc_coll_layout_t *L)
+{
+    return (L->num_os >= 4) ? 2 : 1;
+}
+
 int ompi_lithe_hosted_sc_coll_barrier(MPI_Comm comm)
 {
     sc_coll_layout_t L;
@@ -515,27 +553,30 @@ int ompi_lithe_hosted_sc_coll_barrier(MPI_Comm comm)
         return MPI_SUCCESS;
     }
     /* Multi-OS hybrid: local arrive → leader cross-OS sync → local release. */
-    sc_coll_ticket_barrier((int) L.rph, 1);
+    {
+        const int prog = sc_coll_multi_os_progress_mode(&L);
+        sc_coll_ticket_barrier((int) L.rph, prog);
 #if HAVE_LITHE
-    if (sc_coll_gate_wanted()) {
-        int32_t snap = sc_coll_gate_snapshot();
-        if (L.is_leader) {
-            rc = sc_coll_leaders_barrier(comm, &L);
-            sc_coll_gate_release(snap);
+        if (sc_coll_gate_wanted(L.num_os)) {
+            int32_t snap = sc_coll_gate_snapshot();
+            if (L.is_leader) {
+                rc = sc_coll_leaders_barrier(comm, &L);
+                sc_coll_gate_release(snap);
+            } else {
+                sc_coll_gate_wait(snap);
+                rc = MPI_SUCCESS;
+            }
         } else {
-            sc_coll_gate_wait(snap);
-            rc = MPI_SUCCESS;
+            rc = sc_coll_leaders_barrier(comm, &L);
         }
-    } else {
-        rc = sc_coll_leaders_barrier(comm, &L);
-    }
 #else
-    rc = sc_coll_leaders_barrier(comm, &L);
+        rc = sc_coll_leaders_barrier(comm, &L);
 #endif
-    if (MPI_SUCCESS != rc) {
-        return rc;
+        if (MPI_SUCCESS != rc) {
+            return rc;
+        }
+        sc_coll_ticket_barrier((int) L.rph, prog);
     }
-    sc_coll_ticket_barrier((int) L.rph, 1);
     return MPI_SUCCESS;
 }
 
@@ -590,14 +631,52 @@ int ompi_lithe_hosted_sc_coll_allreduce(const void *sendbuf, void *recvbuf,
     }
 
     /* Multi-OS: local reduce → leader RD → broadcast via leader slot. */
-    sc_coll_ticket_barrier((int) L.rph, 1);
-#if HAVE_LITHE
     {
-        int32_t snap = 0;
-        int use_gate = sc_coll_gate_wanted();
-        if (use_gate) {
-            snap = sc_coll_gate_snapshot();
+        const int prog = sc_coll_multi_os_progress_mode(&L);
+        sc_coll_ticket_barrier((int) L.rph, prog);
+#if HAVE_LITHE
+        {
+            int32_t snap = 0;
+            int use_gate = sc_coll_gate_wanted(L.num_os);
+            if (use_gate) {
+                snap = sc_coll_gate_snapshot();
+            }
+            if (L.is_leader) {
+                base = L.leader_rank;
+                acc = recvbuf;
+                ret = ompi_datatype_copy_content_same_ddt(datatype, count, (char *) acc,
+                                                          (char *) sc_coll.slots[base]);
+                if (ret < 0) {
+                    return OMPI_ERROR;
+                }
+                for (r = 1; r < (int) L.rph; ++r) {
+                    ompi_op_reduce(op, sc_coll.slots[base + r], acc, count, datatype);
+                }
+                ret = sc_coll_leaders_allreduce(acc, count, datatype, op, comm, &L);
+                if (MPI_SUCCESS != ret) {
+                    if (use_gate) {
+                        sc_coll_gate_release(snap);
+                    }
+                    return ret;
+                }
+                ret = ompi_datatype_copy_content_same_ddt(datatype, count,
+                                                          (char *) sc_coll.slots[base],
+                                                          (char *) acc);
+                if (ret < 0) {
+                    if (use_gate) {
+                        sc_coll_gate_release(snap);
+                    }
+                    return OMPI_ERROR;
+                }
+                opal_atomic_wmb();
+                if (use_gate) {
+                    sc_coll_gate_release(snap);
+                }
+            } else if (use_gate) {
+                sc_coll_gate_wait(snap);
+            }
         }
+#else
         if (L.is_leader) {
             base = L.leader_rank;
             acc = recvbuf;
@@ -611,59 +690,24 @@ int ompi_lithe_hosted_sc_coll_allreduce(const void *sendbuf, void *recvbuf,
             }
             ret = sc_coll_leaders_allreduce(acc, count, datatype, op, comm, &L);
             if (MPI_SUCCESS != ret) {
-                if (use_gate) {
-                    sc_coll_gate_release(snap);
-                }
                 return ret;
             }
             ret = ompi_datatype_copy_content_same_ddt(datatype, count,
                                                       (char *) sc_coll.slots[base],
                                                       (char *) acc);
             if (ret < 0) {
-                if (use_gate) {
-                    sc_coll_gate_release(snap);
-                }
                 return OMPI_ERROR;
             }
             opal_atomic_wmb();
-            if (use_gate) {
-                sc_coll_gate_release(snap);
-            }
-        } else if (use_gate) {
-            sc_coll_gate_wait(snap);
         }
-    }
-#else
-    if (L.is_leader) {
-        base = L.leader_rank;
-        acc = recvbuf;
-        ret = ompi_datatype_copy_content_same_ddt(datatype, count, (char *) acc,
-                                                  (char *) sc_coll.slots[base]);
-        if (ret < 0) {
-            return OMPI_ERROR;
-        }
-        for (r = 1; r < (int) L.rph; ++r) {
-            ompi_op_reduce(op, sc_coll.slots[base + r], acc, count, datatype);
-        }
-        ret = sc_coll_leaders_allreduce(acc, count, datatype, op, comm, &L);
-        if (MPI_SUCCESS != ret) {
-            return ret;
-        }
-        ret = ompi_datatype_copy_content_same_ddt(datatype, count,
-                                                  (char *) sc_coll.slots[base],
-                                                  (char *) acc);
-        if (ret < 0) {
-            return OMPI_ERROR;
-        }
-        opal_atomic_wmb();
-    }
 #endif
-    sc_coll_ticket_barrier((int) L.rph, 1);
-    ret = ompi_datatype_copy_content_same_ddt(datatype, count, (char *) recvbuf,
-                                              (char *) sc_coll.slots[L.leader_rank]);
-    if (ret < 0) {
-        return OMPI_ERROR;
+        sc_coll_ticket_barrier((int) L.rph, prog);
+        ret = ompi_datatype_copy_content_same_ddt(datatype, count, (char *) recvbuf,
+                                                  (char *) sc_coll.slots[L.leader_rank]);
+        if (ret < 0) {
+            return OMPI_ERROR;
+        }
+        sc_coll_ticket_barrier((int) L.rph, prog);
     }
-    sc_coll_ticket_barrier((int) L.rph, 1);
     return MPI_SUCCESS;
 }
