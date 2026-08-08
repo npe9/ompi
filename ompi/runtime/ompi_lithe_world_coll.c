@@ -140,6 +140,8 @@ typedef struct {
     opal_atomic_int32_t result_epoch[2];
     /* Non-leader local partial (slot1) ready marker per bank. */
     opal_atomic_int32_t partial_epoch[2];
+    /* Private fold buffer for concurrent slot1 partial (never mutates slots[]). */
+    unsigned char *partial_buf[2];
     /* Per-rank publish ready (multi-OS Allreduce): replaces first ticket wait
      * so non-leaders can progress/result-wait without spinning on peers. */
     opal_atomic_int32_t slot_ready[2][OMPI_LITHE_SC_COLL_MAX_RANKS];
@@ -149,6 +151,7 @@ typedef struct {
 
 /* Static arena: avoids first-touch malloc races when K contexts enter together. */
 static unsigned char sc_coll_arena[2][OMPI_LITHE_SC_COLL_MAX_RANKS * OMPI_LITHE_SC_COLL_MAX_BYTES];
+static unsigned char sc_coll_partial_arena[2][OMPI_LITHE_SC_COLL_MAX_BYTES];
 static ompi_lithe_sc_coll_state_t sc_coll;
 
 #if HAVE_LITHE
@@ -707,6 +710,7 @@ static int sc_coll_ensure_arena(size_t nbytes)
                 + (size_t) i * sc_coll.slot_bytes;
             opal_atomic_swap_32(&sc_coll.slot_ready[b][i], 0);
         }
+        sc_coll.partial_buf[b] = sc_coll_partial_arena[b];
         opal_atomic_swap_32(&sc_coll.result_epoch[b], 0);
         opal_atomic_swap_32(&sc_coll.partial_epoch[b], 0);
     }
@@ -895,22 +899,33 @@ typedef struct {
 } sc_coll_local_reduce_ctx_t;
 
 /*
- * Slot1 concurrent local partial: OFF by default. Opt-in races with the
- * leader serial fold (never-block path) — wrong residuals + hart starve.
- * Requires LITHE_HOSTED_SC_CONCURRENT_PARTIAL=1 and P>=3, RPH>=4.
+ * Slot1 concurrent local partial: default ON for P>=3 && RPH>=4.
+ * Slot1 folds peers 2..rph-1 into a private partial_buf (never mutates
+ * slots[]); leader waits for partial_epoch (yield) then reduces
+ * slot0+partial. Prior never-block path raced serial fold → bad resid /
+ * hang. Opt-out: LITHE_HOSTED_SC_CONCURRENT_PARTIAL=0.
  */
 static int sc_coll_concurrent_local_partial(const sc_coll_layout_t *L)
 {
     static int v = -1;
     if (v < 0) {
         const char *e = getenv("LITHE_HOSTED_SC_CONCURRENT_PARTIAL");
-        if (NULL != e && '1' == e[0] && '\0' == e[1]) {
+        if (NULL != e && '0' == e[0] && '\0' == e[1]) {
+            v = 0;
+        } else if (NULL != e && '1' == e[0] && '\0' == e[1]) {
             v = 1;
         } else {
-            v = 0;
+            /* Unset: auto-on for multi-OS P>=3 RPH>=4. */
+            v = 2;
         }
     }
-    return (v && L->num_os >= 3 && (int) L->rph >= 4) ? 1 : 0;
+    if (0 == v) {
+        return 0;
+    }
+    if (1 == v) {
+        return (L->num_os >= 3 && (int) L->rph >= 4) ? 1 : 0;
+    }
+    return (L->num_os >= 3 && (int) L->rph >= 4) ? 1 : 0;
 }
 
 /* Leader-side: wait publishes (optional), fold local slots (+ slot1 partial). */
@@ -934,15 +949,13 @@ static int sc_coll_leader_finish_local_reduce(void *vctx)
         return OMPI_ERROR;
     }
     /*
-     * Prefer slot1's concurrent partial if already published, but never
-     * block on it — waiting for partial under MTP/soft_cap can deadlock
-     * when slot1 is not yet scheduled (seen hung at Dirichlet BC on P4).
-     * All slot_ready are set, so a serial fold is always correct.
+     * Concurrent partial: wait (with yield) for slot1's private fold, then
+     * reduce it. Waiting is required for correctness; never race a serial
+     * fold against an in-flight mutator of slots[base+1].
      */
-    if (sc_coll_concurrent_local_partial(L)
-        && opal_atomic_add_fetch_32(&sc_coll.partial_epoch[C->bank], 0)
-               == C->epoch) {
-        ompi_op_reduce(C->op, sc_coll.slots[C->bank][base + 1], acc, C->count,
+    if (sc_coll_concurrent_local_partial(L)) {
+        sc_coll_wait_epoch(&sc_coll.partial_epoch[C->bank], C->epoch, C->prog);
+        ompi_op_reduce(C->op, sc_coll.partial_buf[C->bank], acc, C->count,
                        C->datatype);
     } else {
         for (r = 1; r < (int) L->rph; ++r) {
@@ -1135,7 +1148,7 @@ int ompi_lithe_hosted_sc_coll_allreduce(const void *sendbuf, void *recvbuf,
             }
         } else {
             /* Concurrent local reduce (P>=3, RPH>=4): slot1 folds peers
-             * 2..rph-1 while leader posts A2A Irecvs. */
+             * 2..rph-1 into private partial_buf while leader posts A2A Irecvs. */
             if (sc_coll_concurrent_local_partial(&L) && 1 == L.local_slot) {
                 base = L.leader_rank;
                 if (pub_ready) {
@@ -1144,9 +1157,18 @@ int ompi_lithe_hosted_sc_coll_allreduce(const void *sendbuf, void *recvbuf,
                                            epoch, prog);
                     }
                 }
+                ret = ompi_datatype_copy_content_same_ddt(
+                    datatype, count, (char *) sc_coll.partial_buf[bank],
+                    (char *) sc_coll.slots[bank][base + 1]);
+                if (ret < 0) {
+                    if (use_gate) {
+                        sc_coll_gate_release(snap);
+                    }
+                    return OMPI_ERROR;
+                }
                 for (r = 2; r < (int) L.rph; ++r) {
                     ompi_op_reduce(op, sc_coll.slots[bank][base + r],
-                                   sc_coll.slots[bank][base + 1], count, datatype);
+                                   sc_coll.partial_buf[bank], count, datatype);
                 }
                 opal_atomic_wmb();
                 opal_atomic_swap_32(&sc_coll.partial_epoch[bank], epoch);
@@ -1200,9 +1222,15 @@ int ompi_lithe_hosted_sc_coll_allreduce(const void *sendbuf, void *recvbuf,
                                            epoch, prog);
                     }
                 }
+                ret = ompi_datatype_copy_content_same_ddt(
+                    datatype, count, (char *) sc_coll.partial_buf[bank],
+                    (char *) sc_coll.slots[bank][base + 1]);
+                if (ret < 0) {
+                    return OMPI_ERROR;
+                }
                 for (r = 2; r < (int) L.rph; ++r) {
                     ompi_op_reduce(op, sc_coll.slots[bank][base + r],
-                                   sc_coll.slots[bank][base + 1], count, datatype);
+                                   sc_coll.partial_buf[bank], count, datatype);
                 }
                 opal_atomic_wmb();
                 opal_atomic_swap_32(&sc_coll.partial_epoch[bank], epoch);
