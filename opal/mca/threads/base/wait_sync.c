@@ -132,6 +132,7 @@ check_status:
      * static counter is raced/reset across peers and starves cxi nanosleep.
      */
     unsigned lithe_nocq_idle_iters = 0;
+    unsigned lithe_fullcore_yield_iters = 0;
     static int lithe_ws_single_os = -1;
     static int lithe_ws_no_cq_park = -1;
     if (lithe_ws_single_os < 0) {
@@ -198,6 +199,7 @@ check_status:
                            lithe_fork_join_current_runnable_count() > 0) {
                     lithe_context_yield();
                     lithe_nocq_idle_iters = 0;
+                    lithe_fullcore_yield_iters = 0;
                 }
             } else if (lithe_ws_single_os) {
                 if (lithe_fork_join_current_runnable_count() > 0) {
@@ -226,6 +228,24 @@ check_status:
                     (void) opal_progress_block();
                 } else {
                     cpu_relax();
+                }
+            } else if (!lithe_ws_single_os) {
+                /*
+                 * Multi-OS + CQ park (NO_CQ=0, P24K4 fullcore): co-resident
+                 * non-leaders may stay RUNNABLE and drive opal_progress (safe
+                 * shared-EP help — no FI_PEEK). If we always yield when
+                 * runnable_count>0 we never enter progress_block and CXI CQ
+                 * wake starves (pause-spin livelock). Yield a few times to
+                 * multiplex helpers, then CQ-park; helpers' CQ drains call
+                 * wake_cq_waiters so this waiter resumes.
+                 */
+                if ((lithe_fork_join_should_yield_to_runnable() ||
+                     lithe_fork_join_current_runnable_count() > 0) &&
+                    (++lithe_fullcore_yield_iters & 7U) != 0U) {
+                    lithe_context_yield();
+                } else {
+                    lithe_fullcore_yield_iters = 0;
+                    (void) opal_progress_block();
                 }
             } else if (lithe_fork_join_should_yield_to_runnable()) {
                 lithe_context_yield();

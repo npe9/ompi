@@ -123,11 +123,26 @@ void ompi_lithe_world_coll_unlock(MPI_Comm comm)
  * LITHE_HOSTED_SC_FLAT_COLL=0 disables all flat/hybrid (fallback RD).
  */
 #ifndef OMPI_LITHE_SC_COLL_MAX_RANKS
-#define OMPI_LITHE_SC_COLL_MAX_RANKS 64
+/* P24K4 hosted: world = 96 logical ranks (24 OS × RPH=4). Was 64 and
+ * silently disabled SC hybrid on the primary fullcore cell. */
+#define OMPI_LITHE_SC_COLL_MAX_RANKS 128
 #endif
 #ifndef OMPI_LITHE_SC_COLL_MAX_BYTES
 #define OMPI_LITHE_SC_COLL_MAX_BYTES 4096
 #endif
+#ifndef OMPI_LITHE_SC_A2A_MAX_OS
+/* Matches sc_coll_leaders_a2a_wanted auto/force cap (P24 = 24). */
+#define OMPI_LITHE_SC_A2A_MAX_OS 32
+#endif
+
+/* Per-OS-process A2A peer rows (BSS — avoid 128×4KiB stack in Lithe ctxts). */
+static unsigned char sc_a2a_peer_arena[OMPI_LITHE_SC_A2A_MAX_OS *
+                                      OMPI_LITHE_SC_COLL_MAX_BYTES];
+
+static unsigned char *sc_a2a_peer_row(int peer_os)
+{
+    return sc_a2a_peer_arena + (size_t) peer_os * OMPI_LITHE_SC_COLL_MAX_BYTES;
+}
 
 typedef struct {
     /* Monotonic arrival tickets (never reset). Cohort goal = ceil(ticket/size)*size.
@@ -266,7 +281,10 @@ static int sc_coll_dblbuf_wanted(void)
 
 /*
  * Leaders A2A (1 RTT) for num_os>=3. Default on; =0 forces RD; =1 forces A2A
- * even for P=2 (usually worse than RD Sendrecv). Cap at 8 OS (P*(P-1) msgs).
+ * even for P=2 (usually worse than RD Sendrecv).
+ * Cap at 32 OS so non-pow2 P24K4 (24 leaders) gets 1-RTT scalar DOT/halo
+ * instead of falling off SC hybrid entirely (pow2-only RD) back to miniFE
+ * leader-tree + non-leader park (~300× van DOT).
  */
 static int sc_coll_leaders_a2a_wanted(int num_os)
 {
@@ -285,9 +303,9 @@ static int sc_coll_leaders_a2a_wanted(int num_os)
         return 0;
     }
     if (2 == v) {
-        return (num_os >= 2 && num_os <= 8) ? 1 : 0;
+        return (num_os >= 2 && num_os <= 32) ? 1 : 0;
     }
-    return (num_os >= 3 && num_os <= 8) ? 1 : 0;
+    return (num_os >= 3 && num_os <= 32) ? 1 : 0;
 }
 
 /* Epoch/bank from arrived snapshot; copy-before-arrive safe (see file header). */
@@ -397,12 +415,13 @@ static bool sc_coll_layout(struct ompi_communicator_t *comm, sc_coll_layout_t *L
         }
     }
     /*
-     * Multi-OS hybrid (local ticket + leader RD):
+     * Multi-OS hybrid (local ticket + leader cross-OS):
      * - LITHE_HOSTED_SC_FLAT_MULTI_OS=1 → force on
      * - LITHE_HOSTED_SC_FLAT_MULTI_OS=0 → force off
      * - unset: auto-on when RPH>=4 (P2K4/P2K8); keep RD for P2K2 (RPH=2)
      *   where hybrid previously regressed median (~250µs vs ~15µs RD).
-     * Power-of-two OS count required for leader RD.
+     * Pow2 OS: leader RD or A2A. Non-pow2 (e.g. P24): A2A only (xor-RD
+     * needs pow2); if A2A disabled, hybrid is unavailable.
      */
     if (!L->single_os) {
         const char *mos = getenv("LITHE_HOSTED_SC_FLAT_MULTI_OS");
@@ -419,8 +438,20 @@ static bool sc_coll_layout(struct ompi_communicator_t *comm, sc_coll_layout_t *L
         if (!enable) {
             return false;
         }
-        if (L->num_os < 2 || (L->num_os & (L->num_os - 1)) != 0) {
+        if (L->num_os < 2) {
             return false;
+        }
+        if ((L->num_os & (L->num_os - 1)) != 0) {
+            /* Non-pow2 (e.g. P24): opt-in only. Default off — enabling A2A
+             * hybrid for world=96 hung P24K4 at driver/make_local on cxi
+             * (COMPOSITION_BROKEN). LITHE_HOSTED_SC_NONPOW2=1 to experiment. */
+            const char *np = getenv("LITHE_HOSTED_SC_NONPOW2");
+            if (!(np && np[0] == '1' && np[1] == '\0')) {
+                return false;
+            }
+            if (!sc_coll_leaders_a2a_wanted(L->num_os)) {
+                return false;
+            }
         }
     }
     return true;
@@ -514,13 +545,15 @@ static int sc_coll_leaders_allreduce_a2a(void *buf, int count, MPI_Datatype data
 {
     int peer_os, peer_rank, rc, my_os, nreq, i;
     unsigned char mybuf[OMPI_LITHE_SC_COLL_MAX_BYTES];
-    unsigned char peerbuf[OMPI_LITHE_SC_COLL_MAX_RANKS][OMPI_LITHE_SC_COLL_MAX_BYTES];
-    ompi_request_t *reqs[2 * OMPI_LITHE_SC_COLL_MAX_RANKS];
+    ompi_request_t *reqs[2 * OMPI_LITHE_SC_A2A_MAX_OS];
     ptrdiff_t span, gap = 0;
     void *src;
 
     if (!L->is_leader) {
         return MPI_SUCCESS;
+    }
+    if (L->num_os > OMPI_LITHE_SC_A2A_MAX_OS) {
+        return OMPI_ERR_NOT_AVAILABLE;
     }
     span = opal_datatype_span(&datatype->super, count, &gap);
     if (span <= 0 || (size_t) span > OMPI_LITHE_SC_COLL_MAX_BYTES) {
@@ -538,7 +571,7 @@ static int sc_coll_leaders_allreduce_a2a(void *buf, int count, MPI_Datatype data
         }
         peer_rank = peer_os * (int) L->rph;
         reqs[nreq] = MPI_REQUEST_NULL;
-        rc = MCA_PML_CALL(irecv(peerbuf[peer_os], count, datatype, peer_rank,
+        rc = MCA_PML_CALL(irecv(sc_a2a_peer_row(peer_os), count, datatype, peer_rank,
                                 MCA_COLL_BASE_TAG_ALLREDUCE, comm, &reqs[nreq]));
         if (MPI_SUCCESS != rc) {
             for (i = 0; i < nreq; ++i) {
@@ -578,10 +611,10 @@ static int sc_coll_leaders_allreduce_a2a(void *buf, int count, MPI_Datatype data
     if (0 == my_os) {
         memcpy(buf, mybuf, (size_t) span);
     } else {
-        memcpy(buf, peerbuf[0], (size_t) span);
+        memcpy(buf, sc_a2a_peer_row(0), (size_t) span);
     }
     for (peer_os = 1; peer_os < L->num_os; ++peer_os) {
-        src = (peer_os == my_os) ? (void *) mybuf : (void *) peerbuf[peer_os];
+        src = (peer_os == my_os) ? (void *) mybuf : (void *) sc_a2a_peer_row(peer_os);
         ompi_op_reduce(op, src, buf, count, datatype);
     }
     return MPI_SUCCESS;
@@ -598,13 +631,15 @@ static int sc_coll_leaders_allreduce_a2a_overlap(
 {
     int peer_os, peer_rank, rc, my_os, nreq, i, nrecv;
     unsigned char mybuf[OMPI_LITHE_SC_COLL_MAX_BYTES];
-    unsigned char peerbuf[OMPI_LITHE_SC_COLL_MAX_RANKS][OMPI_LITHE_SC_COLL_MAX_BYTES];
-    ompi_request_t *reqs[2 * OMPI_LITHE_SC_COLL_MAX_RANKS];
+    ompi_request_t *reqs[2 * OMPI_LITHE_SC_A2A_MAX_OS];
     ptrdiff_t span, gap = 0;
     void *src;
 
     if (!L->is_leader) {
         return MPI_SUCCESS;
+    }
+    if (L->num_os > OMPI_LITHE_SC_A2A_MAX_OS) {
+        return OMPI_ERR_NOT_AVAILABLE;
     }
     span = opal_datatype_span(&datatype->super, count, &gap);
     if (span <= 0 || (size_t) span > OMPI_LITHE_SC_COLL_MAX_BYTES) {
@@ -620,7 +655,7 @@ static int sc_coll_leaders_allreduce_a2a_overlap(
         }
         peer_rank = peer_os * (int) L->rph;
         reqs[nreq] = MPI_REQUEST_NULL;
-        rc = MCA_PML_CALL(irecv(peerbuf[peer_os], count, datatype, peer_rank,
+        rc = MCA_PML_CALL(irecv(sc_a2a_peer_row(peer_os), count, datatype, peer_rank,
                                 MCA_COLL_BASE_TAG_ALLREDUCE, comm, &reqs[nreq]));
         if (MPI_SUCCESS != rc) {
             for (i = 0; i < nreq; ++i) {
@@ -674,10 +709,10 @@ static int sc_coll_leaders_allreduce_a2a_overlap(
     if (0 == my_os) {
         memcpy(buf, mybuf, (size_t) span);
     } else {
-        memcpy(buf, peerbuf[0], (size_t) span);
+        memcpy(buf, sc_a2a_peer_row(0), (size_t) span);
     }
     for (peer_os = 1; peer_os < L->num_os; ++peer_os) {
-        src = (peer_os == my_os) ? (void *) mybuf : (void *) peerbuf[peer_os];
+        src = (peer_os == my_os) ? (void *) mybuf : (void *) sc_a2a_peer_row(peer_os);
         ompi_op_reduce(op, src, buf, count, datatype);
     }
     return MPI_SUCCESS;
