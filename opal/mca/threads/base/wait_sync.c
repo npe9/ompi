@@ -208,19 +208,22 @@ check_status:
             } else if (lithe_ws_no_cq_park) {
                 /*
                  * Nopump multi-node: pure userspace spin can starve cxi
-                 * CQ delivery. Occasional 5µs clock_nanosleep gives
-                 * kernel entry without the 50µs host pump (med
-                 * ~130–800µs). Yield when should_yield or runnable_count>0
+                 * CQ delivery. Yield when should_yield or runnable_count>0
                  * (P1K8 spare-hart cure). Do NOT unconditional-yield
                  * every 256 — ab9b that raised hang rate 2/20→5/20.
+                 *
+                 * When soft_cap==VCORE==RPH (P24K4 fullcore), runnable_count
+                 * stays 0 once non-leaders park. A 5µs nanosleep / progress_block
+                 * every 2048 was still too rare for CXI CQ wake on P24 Bruck;
+                 * park every 32 idle iters. Always-park (NO_CQ=0) serializes
+                 * P2K2 CG — keep the cadence gated.
                  */
                 if (lithe_fork_join_should_yield_to_runnable() ||
                     lithe_fork_join_current_runnable_count() > 0) {
                     lithe_context_yield();
                     lithe_nocq_idle_iters = 0;
-                } else if ((++lithe_nocq_idle_iters & 2047U) == 0U) {
-                    struct timespec req = {.tv_sec = 0, .tv_nsec = 5000L};
-                    (void) clock_nanosleep(CLOCK_MONOTONIC, 0, &req, NULL);
+                } else if ((++lithe_nocq_idle_iters & 31U) == 0U) {
+                    (void) opal_progress_block();
                 } else {
                     cpu_relax();
                 }
