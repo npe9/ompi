@@ -111,6 +111,14 @@ typedef struct mca_mtl_ofi_module_t {
      * one regular EP+CQ per logical slot instead of a single shared EP. */
     int hosted_multi_ep;
     /*
+     * Shared no-SEP EP: exclusive CQ progress ownership (OMPI-like).
+     * One Lithe context drains/parks the CQ; others wait on Lithe sync
+     * until the owner releases — avoids concurrent FI_PEEK / progress_block
+     * races that livelock P24 Bruck. Set when RPH>=2 && !hosted_multi_ep
+     * unless LITHE_MTL_OFI_EXCL_PROGRESS=0.
+     */
+    int shared_ep_excl_progress;
+    /*
      * Hosted RPH>=2 + no SEP + FI_REMOTE_CQ_DATA: embed *dest and source*
      * co-resident slots (rank % RPH) in the CQD match tag.
      *

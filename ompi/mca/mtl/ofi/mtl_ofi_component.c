@@ -849,6 +849,7 @@ ompi_mtl_ofi_component_init(bool enable_progress_threads,
                         __FILE__, __LINE__, *opal_common_ofi.prov_exclude);
 #if HAVE_LITHE
     ompi_mtl_ofi.hosted_multi_ep = 0;
+    ompi_mtl_ofi.shared_ep_excl_progress = 0;
     ompi_mtl_ofi.hosted_dst_in_cqd_tag = 0;
     ompi_mtl_ofi.hosted_cqd_src_bits = 0;
     ompi_mtl_ofi.hosted_cqd_cid_bits = 0;
@@ -1548,6 +1549,23 @@ select_prov:
             } else {
                 ompi_mtl_ofi.hosted_multi_ep = 0;
                 ret = ompi_mtl_ofi_init_regular_ep(prov, universe_size);
+            }
+            /*
+             * Shared regular EP (cxi no SEP): enable exclusive CQ progress
+             * ownership when RPH>=2. Opt-out: LITHE_MTL_OFI_EXCL_PROGRESS=0.
+             * MULTI_EP has per-slot CQs — ownership not required.
+             */
+            if (OMPI_SUCCESS == ret && 0 == ompi_mtl_ofi.hosted_multi_ep &&
+                lith_rph >= 2UL) {
+                const char *ex = getenv("LITHE_MTL_OFI_EXCL_PROGRESS");
+                int want = 1;
+                if (NULL != ex && '\0' != ex[0]) {
+                    want = (ex[0] != '0');
+                }
+                ompi_mtl_ofi.shared_ep_excl_progress = want ? 1 : 0;
+                if (want) {
+                    ompi_mtl_ofi_shared_ep_excl_init();
+                }
             }
         }
 #else

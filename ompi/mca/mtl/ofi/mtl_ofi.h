@@ -103,6 +103,20 @@ int ompi_mtl_ofi_thread_ctxt_get(void);
  */
 int ompi_mtl_ofi_litheme_mc_outer_progress_enter(void);
 void ompi_mtl_ofi_litheme_mc_outer_progress_leave(void);
+
+/**
+ * Shared no-SEP EP exclusive CQ progress ownership (hosted RPH>=2 on cxi).
+ * One context drains/parks the CQ; others Lithe-park until the owner releases.
+ */
+void ompi_mtl_ofi_shared_ep_excl_init(void);
+int ompi_mtl_ofi_shared_ep_excl_active(void);
+int ompi_mtl_ofi_shared_ep_excl_busy(void);
+int ompi_mtl_ofi_shared_ep_excl_try_own(void);
+void ompi_mtl_ofi_shared_ep_excl_release(void);
+void ompi_mtl_ofi_shared_ep_excl_wait_turn(void);
+void ompi_mtl_ofi_shared_ep_excl_wake(void);
+void ompi_mtl_ofi_shared_ep_excl_stats(unsigned long *acquires,
+                                       unsigned long *wait_turns);
 #endif
 
 #define MCA_MTL_OFI_CID_NOT_EXCHANGED 2
@@ -615,7 +629,16 @@ ompi_mtl_ofi_progress(void)
          * trylock-sweep every peer CQ. The prior every-16th / stop-on-first
          * throttle was for process-per-rank flamegraphs; at RPH>=5 it left
          * peer completions stranded and Allreduce returned wrong sums.
-         * Nested CQ→opal_progress still drains only the invoking ctxt. */
+         * Nested CQ→opal_progress still drains only the invoking ctxt.
+         *
+         * Shared no-SEP EP: exclusive progress ownership — only the owner
+         * may fi_cq_read / CQ-park. Non-owners return 0 immediately (no
+         * context_lock thrash); wait_sync idle uses progress_block which
+         * waits for a turn. */
+        int excl = ompi_mtl_ofi.shared_ep_excl_progress;
+        if (excl && !ompi_mtl_ofi_shared_ep_excl_try_own()) {
+            return 0;
+        }
         int outer = ompi_mtl_ofi_litheme_mc_outer_progress_enter();
 
         mtl_ofi_cq_context_enter_multicontext(ctxt_id);
@@ -645,6 +668,9 @@ ompi_mtl_ofi_progress(void)
             }
         }
         ompi_mtl_ofi_litheme_mc_outer_progress_leave();
+        if (excl) {
+            ompi_mtl_ofi_shared_ep_excl_release();
+        }
         return count;
 #endif
     } else if (ompi_mtl_ofi.mpi_thread_multiple) {
@@ -686,6 +712,20 @@ ompi_mtl_ofi_progress(void)
     return count;
 }
 
+__opal_attribute_always_inline__ static inline void
+mtl_ofi_excl_yield_reacquire(int excl)
+{
+    if (excl) {
+        ompi_mtl_ofi_shared_ep_excl_release();
+    }
+    lithe_context_yield();
+    if (excl) {
+        while (!ompi_mtl_ofi_shared_ep_excl_try_own()) {
+            ompi_mtl_ofi_shared_ep_excl_wait_turn();
+        }
+    }
+}
+
 __opal_attribute_always_inline__ static inline int
 ompi_mtl_ofi_progress_block(void)
 {
@@ -700,25 +740,30 @@ ompi_mtl_ofi_progress_block(void)
          * lithe_context_yield, or parlib_reactor_wait — that serialized all
          * co-resident ranks on one Lithe mutex (P1K2 ~56–180µs vs vanilla ~6µs)
          * and turned should_yield into yield-while-holding-lock churn.
-         * Lock only around fi_cq_read; wake parkers on every successful drain. */
+         * Lock only around fi_cq_read; wake parkers on every successful drain.
+         *
+         * Shared no-SEP + excl ownership: wait for a turn (Lithe park) then
+         * hold the token across fi_cq_read / CQ wait_fd park. Release before
+         * any lithe_context_yield / SC park so wait_turn waiters are not
+         * stranded. */
+        int excl = ompi_mtl_ofi.shared_ep_excl_progress;
+        if (excl) {
+            while (!ompi_mtl_ofi_shared_ep_excl_try_own()) {
+                ompi_mtl_ofi_shared_ep_excl_wait_turn();
+            }
+        }
         int outer = ompi_mtl_ofi_litheme_mc_outer_progress_enter();
         int wait_fd = ompi_mtl_ofi.ofi_ctxt[ctxt_id].cq_wait_fd;
         unsigned int spin_max = lithe_progress_spin_max();
         unsigned int si;
         (void) num_calls_block;
 
-        /* Spin with short blocking CQ drains (lock held only around fi_cq_read).
-         * Pure trylock+infinite-park deadlocked co-resident ranks on shared
-         * no-SEP CQ (both park, nobody drains). Prefer yield under scarcity
-         * over infinite park when RPH>=2.
-         *
-         * Single-OS + SC: when harts are scarce, park on the posted SC recv
-         * instead of yield→empty FJS steal (P1K4 residual). Keep the spin so a
-         * helper hart can finish the peer send before we block (early-park
-         * before spin_max regressed P1K4 to ~70µs). Multi-OS: unchanged. */
         count = mtl_ofi_mc_progress_once(ctxt_id, outer, 1, 1);
         if (count > 0) {
             ompi_mtl_ofi_litheme_mc_outer_progress_leave();
+            if (excl) {
+                ompi_mtl_ofi_shared_ep_excl_release();
+            }
             return count;
         }
 
@@ -726,27 +771,38 @@ ompi_mtl_ofi_progress_block(void)
             count = mtl_ofi_mc_progress_once(ctxt_id, outer, 1, 1);
             if (count > 0) {
                 ompi_mtl_ofi_litheme_mc_outer_progress_leave();
+                if (excl) {
+                    ompi_mtl_ofi_shared_ep_excl_release();
+                }
                 return count;
             }
             if (lithe_fork_join_should_yield_to_runnable()) {
-                if (ompi_mtl_ofi_hosted_sc_enabled()
-                    && ompi_mtl_ofi_hosted_sc_try_park_pending()) {
-                    count = mtl_ofi_mc_progress_once(ctxt_id, outer, 1, 1);
-                    ompi_mtl_ofi_litheme_mc_outer_progress_leave();
-                    return count;
+                if (ompi_mtl_ofi_hosted_sc_enabled()) {
+                    int sc_parked;
+                    if (excl) {
+                        ompi_mtl_ofi_shared_ep_excl_release();
+                    }
+                    sc_parked = ompi_mtl_ofi_hosted_sc_try_park_pending();
+                    if (excl) {
+                        while (!ompi_mtl_ofi_shared_ep_excl_try_own()) {
+                            ompi_mtl_ofi_shared_ep_excl_wait_turn();
+                        }
+                    }
+                    if (sc_parked) {
+                        count = mtl_ofi_mc_progress_once(ctxt_id, outer, 1, 1);
+                        ompi_mtl_ofi_litheme_mc_outer_progress_leave();
+                        if (excl) {
+                            ompi_mtl_ofi_shared_ep_excl_release();
+                        }
+                        return count;
+                    }
                 }
-                lithe_context_yield();
+                mtl_ofi_excl_yield_reacquire(excl);
                 continue;
             }
             cpu_relax();
         }
 
-        /* Single-OS-process hosted (LITHE_MTL_OFI_SINGLE_OS=1 from launcher when
-         * NTASKS==1): do not park on the CQ fd — shared no-SEP waiters race on
-         * edge wakeups, and park floors P1K2 Barrier+Allreduce. SC park under
-         * scarcity (above); else yield if scarce, drain once more, return to
-         * wait_sync. Multi-OS: CQ park so remote completions can wake us
-         * (P2K2 needs this; no-park → ~800µs). */
         {
             static int single_os = -1;
             if (single_os < 0) {
@@ -755,27 +811,43 @@ ompi_mtl_ofi_progress_block(void)
             }
             if (single_os || wait_fd < 0) {
                 if (lithe_fork_join_should_yield_to_runnable()) {
-                    if (single_os && ompi_mtl_ofi_hosted_sc_enabled()
-                        && ompi_mtl_ofi_hosted_sc_try_park_pending()) {
-                        count = mtl_ofi_mc_progress_once(ctxt_id, outer, 1, 1);
-                        ompi_mtl_ofi_litheme_mc_outer_progress_leave();
-                        return count;
+                    if (single_os && ompi_mtl_ofi_hosted_sc_enabled()) {
+                        int sc_parked;
+                        if (excl) {
+                            ompi_mtl_ofi_shared_ep_excl_release();
+                        }
+                        sc_parked = ompi_mtl_ofi_hosted_sc_try_park_pending();
+                        if (excl) {
+                            while (!ompi_mtl_ofi_shared_ep_excl_try_own()) {
+                                ompi_mtl_ofi_shared_ep_excl_wait_turn();
+                            }
+                        }
+                        if (sc_parked) {
+                            count = mtl_ofi_mc_progress_once(ctxt_id, outer, 1, 1);
+                            ompi_mtl_ofi_litheme_mc_outer_progress_leave();
+                            if (excl) {
+                                ompi_mtl_ofi_shared_ep_excl_release();
+                            }
+                            return count;
+                        }
                     }
-                    lithe_context_yield();
+                    mtl_ofi_excl_yield_reacquire(excl);
                 }
                 count = mtl_ofi_mc_progress_once(ctxt_id, outer, 1, 1);
                 ompi_mtl_ofi_litheme_mc_outer_progress_leave();
+                if (excl) {
+                    ompi_mtl_ofi_shared_ep_excl_release();
+                }
                 return count;
             }
         }
-        /* Multi-OS: serialize CQ park behind context_lock (one waiter on the
-         * shared wait_fd). Yield only under hart scarcity — not whenever
-         * runnable_count>0 (the park+pump helper is often RUNNABLE and would
-         * suppress CQ park entirely → no kernel entry → cxi hang). */
         if (lithe_fork_join_should_yield_to_runnable()) {
-            lithe_context_yield();
+            mtl_ofi_excl_yield_reacquire(excl);
             count = mtl_ofi_mc_progress_once(ctxt_id, outer, 1, 1);
             ompi_mtl_ofi_litheme_mc_outer_progress_leave();
+            if (excl) {
+                ompi_mtl_ofi_shared_ep_excl_release();
+            }
             return count;
         }
         mtl_ofi_cq_context_enter_multicontext(ctxt_id);
@@ -783,6 +855,9 @@ ompi_mtl_ofi_progress_block(void)
         mtl_ofi_cq_context_exit_multicontext(ctxt_id);
         mtl_ofi_mc_wake_cq_waiters(ctxt_id, count);
         ompi_mtl_ofi_litheme_mc_outer_progress_leave();
+        if (excl) {
+            ompi_mtl_ofi_shared_ep_excl_release();
+        }
         return count;
 #endif
     } else {

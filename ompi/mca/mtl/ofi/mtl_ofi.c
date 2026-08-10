@@ -14,6 +14,12 @@
 
 #include <string.h>
 
+#if HAVE_LITHE
+#include <lithe/mutex.h>
+#include <lithe/condvar.h>
+#include "opal/sys/atomic.h"
+#endif
+
 OMPI_DECLSPEC extern mca_mtl_ofi_component_t mca_mtl_ofi_component;
 
 OBJ_CLASS_INSTANCE(mca_mtl_comm_t, opal_object_t, NULL, NULL);
@@ -45,6 +51,146 @@ mca_mtl_ofi_module_t ompi_mtl_ofi = {
     NULL,
     NULL
 };
+
+#if HAVE_LITHE
+/*
+ * Shared no-SEP EP: exclusive CQ progress ownership.
+ * Owner cookie is lithe_context_self(); nest depth allows CQ callbacks that
+ * re-enter opal_progress while the same context holds the token.
+ */
+static opal_atomic_intptr_t mtl_ofi_excl_owner = 0;
+static opal_atomic_int32_t mtl_ofi_excl_depth = 0;
+static lithe_mutex_t mtl_ofi_excl_mtx;
+static lithe_condvar_t mtl_ofi_excl_cv;
+static volatile int mtl_ofi_excl_inited = 0;
+static volatile unsigned long mtl_ofi_excl_acquires = 0;
+static volatile unsigned long mtl_ofi_excl_wait_turns = 0;
+
+void ompi_mtl_ofi_shared_ep_excl_init(void)
+{
+    if (mtl_ofi_excl_inited) {
+        return;
+    }
+    lithe_mutex_init(&mtl_ofi_excl_mtx, NULL);
+    lithe_condvar_init(&mtl_ofi_excl_cv);
+    (void) opal_atomic_swap_ptr(&mtl_ofi_excl_owner, (intptr_t) 0);
+    (void) opal_atomic_swap_32(&mtl_ofi_excl_depth, 0);
+    opal_atomic_mb();
+    mtl_ofi_excl_inited = 1;
+}
+
+int ompi_mtl_ofi_shared_ep_excl_active(void)
+{
+    return (ompi_mtl_ofi.shared_ep_excl_progress && mtl_ofi_excl_inited) ? 1 : 0;
+}
+
+int ompi_mtl_ofi_shared_ep_excl_busy(void)
+{
+    if (!ompi_mtl_ofi.shared_ep_excl_progress || !mtl_ofi_excl_inited) {
+        return 0;
+    }
+    return (__atomic_load_n(&mtl_ofi_excl_owner, __ATOMIC_ACQUIRE) != 0) ? 1 : 0;
+}
+
+int ompi_mtl_ofi_shared_ep_excl_try_own(void)
+{
+    lithe_context_t *self;
+    intptr_t self_i;
+    intptr_t expected;
+
+    if (!ompi_mtl_ofi.shared_ep_excl_progress || !mtl_ofi_excl_inited) {
+        return 1; /* disabled ⇒ always "own" */
+    }
+    self = lithe_context_self();
+    if (NULL == self) {
+        return 1; /* pre-bootstrap: do not block */
+    }
+    self_i = (intptr_t) self;
+
+    /* Nested re-enter: already owner → bump depth. */
+    expected = self_i;
+    if (opal_atomic_compare_exchange_strong_ptr(&mtl_ofi_excl_owner, &expected,
+                                                self_i)) {
+        (void) opal_atomic_add_fetch_32(&mtl_ofi_excl_depth, 1);
+        return 1;
+    }
+
+    /* Free token? */
+    expected = 0;
+    if (opal_atomic_compare_exchange_strong_ptr(&mtl_ofi_excl_owner, &expected,
+                                                self_i)) {
+        (void) opal_atomic_swap_32(&mtl_ofi_excl_depth, 1);
+        (void) __sync_fetch_and_add(&mtl_ofi_excl_acquires, 1UL);
+        return 1;
+    }
+    return 0;
+}
+
+void ompi_mtl_ofi_shared_ep_excl_release(void)
+{
+    int32_t d;
+    if (!ompi_mtl_ofi.shared_ep_excl_progress || !mtl_ofi_excl_inited) {
+        return;
+    }
+    d = opal_atomic_add_fetch_32(&mtl_ofi_excl_depth, -1);
+    if (d > 0) {
+        return;
+    }
+    /* Clear owner before broadcast; waiters re-check under excl_mtx. */
+    (void) opal_atomic_swap_ptr(&mtl_ofi_excl_owner, (intptr_t) 0);
+    lithe_mutex_lock(&mtl_ofi_excl_mtx);
+    lithe_condvar_broadcast(&mtl_ofi_excl_cv);
+    lithe_mutex_unlock(&mtl_ofi_excl_mtx);
+}
+
+void ompi_mtl_ofi_shared_ep_excl_wait_turn(void)
+{
+    lithe_context_t *self;
+    intptr_t self_i;
+    intptr_t cur;
+
+    if (!ompi_mtl_ofi.shared_ep_excl_progress || !mtl_ofi_excl_inited) {
+        return;
+    }
+    self = lithe_context_self();
+    self_i = (intptr_t) self;
+    (void) __sync_fetch_and_add(&mtl_ofi_excl_wait_turns, 1UL);
+    /*
+     * Lock + while(busy): release broadcasts under the same mutex so we
+     * cannot miss the wake (single-wait lost-wakeup hung P2K4).
+     */
+    lithe_mutex_lock(&mtl_ofi_excl_mtx);
+    for (;;) {
+        cur = (intptr_t) __atomic_load_n(&mtl_ofi_excl_owner, __ATOMIC_ACQUIRE);
+        if (0 == cur || cur == self_i) {
+            break;
+        }
+        lithe_condvar_wait(&mtl_ofi_excl_cv, &mtl_ofi_excl_mtx);
+    }
+    lithe_mutex_unlock(&mtl_ofi_excl_mtx);
+}
+
+void ompi_mtl_ofi_shared_ep_excl_wake(void)
+{
+    if (!ompi_mtl_ofi.shared_ep_excl_progress || !mtl_ofi_excl_inited) {
+        return;
+    }
+    lithe_mutex_lock(&mtl_ofi_excl_mtx);
+    lithe_condvar_broadcast(&mtl_ofi_excl_cv);
+    lithe_mutex_unlock(&mtl_ofi_excl_mtx);
+}
+
+void ompi_mtl_ofi_shared_ep_excl_stats(unsigned long *acquires,
+                                       unsigned long *wait_turns)
+{
+    if (NULL != acquires) {
+        *acquires = mtl_ofi_excl_acquires;
+    }
+    if (NULL != wait_turns) {
+        *wait_turns = mtl_ofi_excl_wait_turns;
+    }
+}
+#endif /* HAVE_LITHE */
 
 static uint32_t ompi_mtl_ofi_lithe_ranks_per_host(void)
 {
