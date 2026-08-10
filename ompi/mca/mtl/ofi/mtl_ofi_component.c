@@ -1524,11 +1524,19 @@ select_prov:
         {
             unsigned long lith_rph = opal_lithe_env_cache_rph();
             /* Multi regular-EP remains opt-in (LITHE_MTL_OFI_MULTI_EP=1).
-             * Site cxi loopback across same-process regular EPs still hangs
-             * at P1K2; dest+src slot-in-CQD-tag is the default demux path. */
+             * Site cxi: no SEP (max_ep_*_ctx=1) but ep_cnt>>1 — one regular
+             * EP+CQ per slot. Vanilla cxi same-process EP loopback works;
+             * lithified stack still hangs residual OFI same-OS paths at P1K*
+             * even with SC (pairwise SC OK, world Barrier/Allreduce hangs).
+             * Skip MULTI_EP when LITHE_MTL_OFI_SINGLE_OS=1 (world==RPH): SC
+             * alone is the composition path. MULTI_EP unlocks multi-OS: each
+             * of K contexts progresses a distinct CQ toward remote peers. */
             const char *multi_env = getenv("LITHE_MTL_OFI_MULTI_EP");
+            const char *single_os_env = getenv("LITHE_MTL_OFI_SINGLE_OS");
+            int single_os = (NULL != single_os_env && single_os_env[0] == '1' &&
+                             single_os_env[1] == '\0');
             int want_multi = (NULL != multi_env && multi_env[0] != '\0' &&
-                              multi_env[0] != '0');
+                              multi_env[0] != '0' && !single_os);
             if (want_multi && lith_rph >= 2UL && 0 == sep_support_in_provider) {
                 int want = (int) lith_rph;
                 size_t ep_cnt = prov->domain_attr->ep_cnt;

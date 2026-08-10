@@ -117,6 +117,13 @@ void ompi_mtl_ofi_shared_ep_excl_wait_turn(void);
 void ompi_mtl_ofi_shared_ep_excl_wake(void);
 void ompi_mtl_ofi_shared_ep_excl_stats(unsigned long *acquires,
                                        unsigned long *wait_turns);
+/* MULTI_EP composition stats: CQ drains per ofi ctxt + distinct ctxts. */
+void ompi_mtl_ofi_multi_ep_note_cq_drain(int ctxt_id, int got);
+void ompi_mtl_ofi_multi_ep_stats(unsigned long *drains_out,
+                                 unsigned long *events_out,
+                                 unsigned long *ctxts_touched_out,
+                                 int *num_ctxts_out,
+                                 int *hosted_multi_ep_out);
 #endif
 
 #define MCA_MTL_OFI_CID_NOT_EXCHANGED 2
@@ -501,7 +508,17 @@ ompi_mtl_ofi_context_progress(int ctxt_id)
      */
     ret = fi_cq_read(ompi_mtl_ofi.ofi_ctxt[ctxt_id].cq, (void *)&ompi_mtl_ofi_wc,
                      ompi_mtl_ofi.ofi_progress_event_count);
+#if HAVE_LITHE
+    {
+        int got = ompi_mtl_ofi_context_process_cq(ctxt_id, ompi_mtl_ofi_wc, ret);
+        if (ompi_mtl_ofi.hosted_multi_ep && got > 0) {
+            ompi_mtl_ofi_multi_ep_note_cq_drain(ctxt_id, got);
+        }
+        return got;
+    }
+#else
     return ompi_mtl_ofi_context_process_cq(ctxt_id, ompi_mtl_ofi_wc, ret);
+#endif
 }
 
 __opal_attribute_always_inline__ static inline int

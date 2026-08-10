@@ -261,6 +261,19 @@ static bool sc_flat_coll_enabled(void)
     if (NULL != e && '0' == e[0] && '\0' == e[1]) {
         return false;
     }
+    /*
+     * MULTI_EP composition: every co-resident context owns a CQ/EP. Hybrid
+     * flat (leaders-only cross-OS) fights that model and hangs at P2K4+ on
+     * cxi. Fall back to world RD / miniFE slot-reduce so all slots progress
+     * fabric. Opt back into hybrid with LITHE_HOSTED_SC_FLAT_COLL=1 only if
+     * MULTI_EP is off.
+     */
+    {
+        const char *mep = getenv("LITHE_MTL_OFI_MULTI_EP");
+        if (NULL != mep && mep[0] != '\0' && mep[0] != '0') {
+            return false;
+        }
+    }
     return true;
 }
 

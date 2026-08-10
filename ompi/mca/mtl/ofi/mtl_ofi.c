@@ -190,6 +190,60 @@ void ompi_mtl_ofi_shared_ep_excl_stats(unsigned long *acquires,
         *wait_turns = mtl_ofi_excl_wait_turns;
     }
 }
+
+/* Per-ofi-ctxt CQ drain counters (composition: >1 ctxts_touched under MULTI_EP). */
+enum { MTL_OFI_MULTI_EP_STAT_MAX = 64 };
+static volatile unsigned long mtl_ofi_mep_drains[MTL_OFI_MULTI_EP_STAT_MAX];
+static volatile unsigned long mtl_ofi_mep_events[MTL_OFI_MULTI_EP_STAT_MAX];
+
+void ompi_mtl_ofi_multi_ep_note_cq_drain(int ctxt_id, int got)
+{
+    if (ctxt_id < 0 || ctxt_id >= MTL_OFI_MULTI_EP_STAT_MAX || got <= 0) {
+        return;
+    }
+    (void) __sync_fetch_and_add(&mtl_ofi_mep_drains[ctxt_id], 1UL);
+    (void) __sync_fetch_and_add(&mtl_ofi_mep_events[ctxt_id],
+                                (unsigned long) got);
+}
+
+void ompi_mtl_ofi_multi_ep_stats(unsigned long *drains_out,
+                                 unsigned long *events_out,
+                                 unsigned long *ctxts_touched_out,
+                                 int *num_ctxts_out,
+                                 int *hosted_multi_ep_out)
+{
+    int n, i;
+    unsigned long drains = 0, events = 0, touched = 0;
+
+    n = ompi_mtl_ofi.num_ofi_contexts;
+    if (n > MTL_OFI_MULTI_EP_STAT_MAX) {
+        n = MTL_OFI_MULTI_EP_STAT_MAX;
+    }
+    for (i = 0; i < n; ++i) {
+        unsigned long d = mtl_ofi_mep_drains[i];
+        unsigned long e = mtl_ofi_mep_events[i];
+        drains += d;
+        events += e;
+        if (d > 0 || e > 0) {
+            touched++;
+        }
+    }
+    if (NULL != drains_out) {
+        *drains_out = drains;
+    }
+    if (NULL != events_out) {
+        *events_out = events;
+    }
+    if (NULL != ctxts_touched_out) {
+        *ctxts_touched_out = touched;
+    }
+    if (NULL != num_ctxts_out) {
+        *num_ctxts_out = n;
+    }
+    if (NULL != hosted_multi_ep_out) {
+        *hosted_multi_ep_out = ompi_mtl_ofi.hosted_multi_ep;
+    }
+}
 #endif /* HAVE_LITHE */
 
 static uint32_t ompi_mtl_ofi_lithe_ranks_per_host(void)
