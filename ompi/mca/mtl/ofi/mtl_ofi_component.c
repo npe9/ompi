@@ -1868,3 +1868,6 @@ finalize_err:
 
     return OMPI_ERROR;
 }
+
+/* Storage for the CQ holder diagnostic declared in mtl_ofi.h. */
+mtl_ofi_cq_owner_t mtl_ofi_cq_owner_dbg[MTL_OFI_CQ_OWNER_MAX];

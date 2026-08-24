@@ -280,6 +280,112 @@ ompi_mtl_ofi_lithe_multicontext_active(void)
     return opal_lithe_env_cache_active();
 }
 
+/* LITHE_MTL_OFI_STARVE_YIELD=1 arms the hart-donation escapes added for
+ * VCORE_LIMIT < RANKS_PER_HOST (the EAGAIN post retry and the two post-spin
+ * progress tails). Off by default so the shipped VCORE >= K behaviour is
+ * bit-identical to before; the flag exists because those escapes must be A/B'd
+ * in one binary — a rebuild per variant costs a queue slot each time. */
+static inline int ompi_mtl_ofi_starve_yield_enabled(void)
+{
+    static int cached = -1;
+    if (OPAL_UNLIKELY(cached < 0)) {
+        const char *e = getenv("LITHE_MTL_OFI_STARVE_YIELD");
+        cached = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
+    }
+    return cached;
+}
+
+static inline int ompi_mtl_ofi_cq_ttas_enabled(void)
+{
+    static int cached = -1;
+    if (OPAL_UNLIKELY(cached < 0)) {
+        const char *e = getenv("LITHE_MTL_OFI_CQ_TTAS");
+        cached = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
+    }
+    return cached;
+}
+
+/* CQ LOCK HOLDER DIAGNOSTIC (LITHE_MTL_OFI_CQ_OWNER=1, default off).
+ *
+ * The TTAS experiment showed the trylock convoy is a SYMPTOM: removing it did
+ * not change the NX64 completion rate (1/5 vs 1/4). Spinner stacks show where
+ * the queue is, never why its head is stuck. So record the HOLDER.
+ *
+ * On acquire, stamp owner rank + context pointer + a monotonic timestamp; clear
+ * on release. A spinner that has been spinning a long time prints who holds the
+ * lock and for how long. That separates the two live hypotheses:
+ *   - ONE holder, held for seconds  -> holder is stuck/descheduled
+ *     (lock-holder preemption; needs a don't-yield-while-holding guard)
+ *   - holder churns rapidly         -> no single stuck holder; the gate is
+ *     merely saturated and the real stall is elsewhere
+ * Self-contained: no watchdog thread, and it prints from the spinner, which is
+ * by construction still running on a hart. */
+#define MTL_OFI_CQ_OWNER_MAX 64
+typedef struct {
+    volatile int   owner_rank;
+    volatile void *owner_ctx;
+    volatile unsigned long acq_ns;
+} mtl_ofi_cq_owner_t;
+extern mtl_ofi_cq_owner_t mtl_ofi_cq_owner_dbg[MTL_OFI_CQ_OWNER_MAX];
+
+static inline int ompi_mtl_ofi_cq_owner_dbg_enabled(void)
+{
+    static int cached = -1;
+    if (OPAL_UNLIKELY(cached < 0)) {
+        const char *e = getenv("LITHE_MTL_OFI_CQ_OWNER");
+        cached = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
+    }
+    return cached;
+}
+
+static inline unsigned long ompi_mtl_ofi_now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (unsigned long) ts.tv_sec * 1000000000UL + (unsigned long) ts.tv_nsec;
+}
+
+static inline void ompi_mtl_ofi_cq_owner_set(int ctxt_id)
+{
+    if (!ompi_mtl_ofi_cq_owner_dbg_enabled() || ctxt_id < 0 ||
+        ctxt_id >= MTL_OFI_CQ_OWNER_MAX)
+        return;
+    mtl_ofi_cq_owner_dbg[ctxt_id].owner_rank = ompi_comm_rank(MPI_COMM_WORLD);
+    mtl_ofi_cq_owner_dbg[ctxt_id].owner_ctx = (void *) lithe_context_self();
+    mtl_ofi_cq_owner_dbg[ctxt_id].acq_ns = ompi_mtl_ofi_now_ns();
+}
+
+static inline void ompi_mtl_ofi_cq_owner_clear(int ctxt_id)
+{
+    if (!ompi_mtl_ofi_cq_owner_dbg_enabled() || ctxt_id < 0 ||
+        ctxt_id >= MTL_OFI_CQ_OWNER_MAX)
+        return;
+    mtl_ofi_cq_owner_dbg[ctxt_id].acq_ns = 0;
+    mtl_ofi_cq_owner_dbg[ctxt_id].owner_ctx = NULL;
+}
+
+/* Print at most a few times per process; a print storm here would turn a
+ * livelock into a stdout-lock deadlock (see E4 teardown note). */
+static inline void ompi_mtl_ofi_cq_owner_report(int ctxt_id, unsigned spin)
+{
+    static int reports = 0;
+    unsigned long acq, now;
+    if (ctxt_id < 0 || ctxt_id >= MTL_OFI_CQ_OWNER_MAX)
+        return;
+    if (__atomic_fetch_add(&reports, 1, __ATOMIC_ACQ_REL) >= 4)
+        return;
+    acq = mtl_ofi_cq_owner_dbg[ctxt_id].acq_ns;
+    now = ompi_mtl_ofi_now_ns();
+    fprintf(stderr,
+            "[cq_owner] waiter_rank=%d ctxt=%d spin=%u holder_rank=%d "
+            "holder_ctx=%p held_for_ms=%lu\n",
+            ompi_comm_rank(MPI_COMM_WORLD), ctxt_id, spin,
+            mtl_ofi_cq_owner_dbg[ctxt_id].owner_rank,
+            (void *) mtl_ofi_cq_owner_dbg[ctxt_id].owner_ctx,
+            acq ? (now - acq) / 1000000UL : 0UL);
+    fflush(stderr);
+}
+
 __opal_attribute_always_inline__ static inline void
 mtl_ofi_cq_context_enter_multicontext(int ctxt_id)
 {
@@ -291,8 +397,48 @@ mtl_ofi_cq_context_enter_multicontext(int ctxt_id)
      * drifted harts_needed ledger no further grant arrives and the lock
      * owner may itself be a descheduled RUNNABLE context — spinning here
      * then deadlocks the last busy harts (P1K4 nx=80 CG stall). */
+    /* TTAS GATE (LITHE_MTL_OFI_CQ_TTAS=1, default off).
+     *
+     * MEASURED PROBLEM (eu-stack of a wedged NX64 run, 405 threads sampled):
+     * 53 threads spinning in mcs_lock_lock, reached via
+     *   26x lithe_mutex_trylock, 11x lithe_mutex_UNLOCK, 8x lithe_mutex_lock.
+     * lithe_mutex_trylock takes the mutex's INTERNAL mcs_pdr_lock on EVERY
+     * attempt (src/lithe/src/mutex.c:94), and lithe_mutex_unlock needs that
+     * SAME internal lock to release (:145). mcs_pdr_lock is FIFO-fair, so the
+     * releasing context must queue behind every spinner — the naive
+     * `while (trylock)` loop below turns the gate into a trylock storm that
+     * starves its own unlock. Hence 11 threads stuck trying to RELEASE.
+     *
+     * FIX: test-and-test-and-set. Peek the plain `locked` word (readable
+     * without the MCS lock) and only pay a real trylock when it looks free.
+     * That takes all MCS traffic off the spin path so the unlocker gets in
+     * immediately. Classic TTAS; the load is relaxed because the trylock that
+     * follows is the actual synchronising operation.
+     *
+     * Left env-gated and default-off so ONE binary runs both arms (rule 2). */
     unsigned spin = 0;
-    while (0 != opal_mutex_trylock(&ompi_mtl_ofi.ofi_ctxt[ctxt_id].context_lock)) {
+    const int ttas = ompi_mtl_ofi_cq_ttas_enabled();
+    while (1) {
+        if (ttas) {
+            /* Spin on a cheap read while held; do not touch the MCS lock. */
+            if (0 != __atomic_load_n(
+                        &ompi_mtl_ofi.ofi_ctxt[ctxt_id].context_lock
+                             .m_lock.lithe_lock.locked,
+                        __ATOMIC_RELAXED)) {
+                goto mtl_ofi_gate_backoff;
+            }
+        }
+        if (0 == opal_mutex_trylock(
+                     &ompi_mtl_ofi.ofi_ctxt[ctxt_id].context_lock)) {
+            ompi_mtl_ofi_cq_owner_set(ctxt_id);
+            break;
+        }
+mtl_ofi_gate_backoff:
+        /* Long-spin: name the holder (default off). 2^20 cpu_relax is ~ms. */
+        if (OPAL_UNLIKELY(ompi_mtl_ofi_cq_owner_dbg_enabled() &&
+                          (spin & 0xFFFFFu) == 0xFFFFFu)) {
+            ompi_mtl_ofi_cq_owner_report(ctxt_id, spin);
+        }
         if ((++spin & 63u) == 0u &&
             (lithe_fork_join_should_yield_to_runnable() ||
              lithe_fork_join_current_runnable_count() > 0)) {
@@ -310,12 +456,43 @@ mtl_ofi_cq_context_enter_multicontext(int ctxt_id)
 __opal_attribute_always_inline__ static inline int
 mtl_ofi_cq_context_trylock_multicontext(int ctxt_id)
 {
-    return (0 == opal_mutex_trylock(&ompi_mtl_ofi.ofi_ctxt[ctxt_id].context_lock));
+    /* TTAS ON THE HOT PATH (LITHE_MTL_OFI_CQ_TTAS=1, default off).
+     *
+     * THIS is where the contention actually is — measured, not assumed. The
+     * wedge stacks show 26 threads in mcs_lock_lock reached via
+     * lithe_mutex_trylock <- ompi_mtl_ofi_progress_no_inline, i.e. through
+     * THIS function, not through the enter_multicontext gate (a holder
+     * diagnostic armed on that gate produced zero reports in 8 wedged runs,
+     * which is what localised it here).
+     *
+     * lithe_mutex_trylock unconditionally takes the mutex's internal FIFO
+     * mcs_pdr_lock (mutex.c:94), and lithe_mutex_unlock needs that same lock
+     * to release (:145). Every progress tick from every context therefore
+     * enqueues on one MCS lock, and the releaser must queue behind all of
+     * them. A waiter here is NOT spinning in a loop we control — it is parked
+     * in the MCS queue inside a single trylock call, which is why a
+     * spin-counter diagnostic on the gate could never see it.
+     *
+     * Peek the plain `locked` word first and skip the trylock entirely when
+     * the lock is held: a failed trylock is worthless anyway, so paying an MCS
+     * enqueue to discover it is pure contention. */
+    if (ompi_mtl_ofi_cq_ttas_enabled() &&
+        0 != __atomic_load_n(&ompi_mtl_ofi.ofi_ctxt[ctxt_id].context_lock
+                                  .m_lock.lithe_lock.locked,
+                             __ATOMIC_RELAXED)) {
+        return 0;
+    }
+    if (0 == opal_mutex_trylock(&ompi_mtl_ofi.ofi_ctxt[ctxt_id].context_lock)) {
+        ompi_mtl_ofi_cq_owner_set(ctxt_id);
+        return 1;
+    }
+    return 0;
 }
 
 __opal_attribute_always_inline__ static inline void
 mtl_ofi_cq_context_exit_multicontext(int ctxt_id)
 {
+    ompi_mtl_ofi_cq_owner_clear(ctxt_id);
     opal_mutex_unlock(&ompi_mtl_ofi.ofi_ctxt[ctxt_id].context_lock);
 }
 
@@ -558,7 +735,13 @@ ompi_mtl_ofi_context_progress_block(int ctxt_id)
             }
             cpu_relax();
         }
-        if (lithe_fork_join_should_yield_to_runnable()) {
+        /* Spin exhausted: also donate to a merely-RUNNABLE peer. Inside the
+         * loop that would yield-storm at VCORE>=K (see above), but here it
+         * costs spin_max iterations first, so the hot path is unchanged and a
+         * hartless peer (VCORE_LIMIT < RANKS_PER_HOST) still gets to run. */
+        if (lithe_fork_join_should_yield_to_runnable() ||
+            (ompi_mtl_ofi_starve_yield_enabled() &&
+             lithe_fork_join_current_runnable_count() > 0)) {
             lithe_context_yield();
             count = ompi_mtl_ofi_context_progress(ctxt_id);
             if (count > 0)
@@ -858,7 +1041,12 @@ ompi_mtl_ofi_progress_block(void)
                 return count;
             }
         }
-        if (lithe_fork_join_should_yield_to_runnable()) {
+        /* Post-spin tail: same undersubscription escape as
+         * ompi_mtl_ofi_context_progress_block — spin_max has already elapsed,
+         * so donating to a RUNNABLE-but-hartless peer cannot storm. */
+        if (lithe_fork_join_should_yield_to_runnable() ||
+            (ompi_mtl_ofi_starve_yield_enabled() &&
+             lithe_fork_join_current_runnable_count() > 0)) {
             mtl_ofi_excl_yield_reacquire(excl);
             count = mtl_ofi_mc_progress_once(ctxt_id, outer, 1, 1);
             ompi_mtl_ofi_litheme_mc_outer_progress_leave();
@@ -904,6 +1092,85 @@ ompi_mtl_ofi_progress_after_eagain(int ctxt_id)
     (void) ompi_mtl_ofi_progress(); /* pthread / single-rank: preserve global progress */
 }
 
+#if HAVE_LITHE
+/* LITHE_MTL_OFI_EAGAIN_SWEEP=1: on a stalled EAGAIN retry, also trylock-drain the
+ * peer ctxt CQs, the way outer ompi_mtl_ofi_progress does.
+ *
+ * At VCORE_LIMIT < RANKS_PER_HOST some context is RUNNABLE but has no hart, so its
+ * endpoint is never progressed and our own RX queue never drains — the halo hangs in
+ * the post ([halo] postall with no after_irecv_posted). Yielding the hart there does
+ * NOT work (measured, f3TbkdQWwETh): this retry loop is itself the only thing draining
+ * the queue, so standing aside means nobody drains. Sweeping the peer's CQ progresses
+ * it *without* descheduling ourselves.
+ *
+ * trylock only — never block on a peer mid-drain. Rate-limited by the caller so the
+ * common single-retry EAGAIN keeps the cheap own-ctxt-only path. */
+static inline int ompi_mtl_ofi_eagain_sweep_enabled(void)
+{
+    static int cached = -1;
+    if (OPAL_UNLIKELY(cached < 0)) {
+        const char *e = getenv("LITHE_MTL_OFI_EAGAIN_SWEEP");
+        cached = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
+    }
+    return cached;
+}
+
+/* EAGAIN STALL DIAGNOSTIC (LITHE_MTL_OFI_EAGAIN_STALL=N, default 0 = off).
+ *
+ * MTL_OFI_RETRY_UNTIL_DONE_CTXT retries fi_* on -FI_EAGAIN in an UNBOUNDED
+ * loop that, with default flags, progresses only its OWN context. The NX>=40
+ * miniFE wedge (MINIFE_PROBLEM_SIZE_SWEEP.md) shows exactly one rank failing to
+ * complete its MPI_Irecv posting loop while its 3 co-resident contexts block in
+ * the OS-local barrier and the other 92 block in the cross-OS fence — i.e. a
+ * candidate circular wait: the stuck rank needs peers to free provider receive
+ * resources, and every peer is parked waiting for the stuck rank.
+ *
+ * This does NOT change behaviour: it only prints once, from the stuck rank,
+ * when a single retry loop exceeds N iterations, naming the op and context so
+ * the hypothesis can be confirmed or killed instead of argued. Default off so
+ * production timings are untouched. One-shot per process to avoid a print storm
+ * turning a livelock into a stdout-lock deadlock (see the E4 teardown note in
+ * ROOT_CAUSE_HART_OVERSUBSCRIPTION.md). */
+static inline unsigned ompi_mtl_ofi_eagain_stall_threshold(void)
+{
+    static int cached = -1;
+    if (OPAL_UNLIKELY(cached < 0)) {
+        const char *e = getenv("LITHE_MTL_OFI_EAGAIN_STALL");
+        long v = (e && *e) ? strtol(e, NULL, 10) : 0;
+        cached = (v > 0 && v < (1L << 30)) ? (int) v : 0;
+    }
+    return (unsigned) cached;
+}
+
+static inline void ompi_mtl_ofi_eagain_stall_report(int ctxt_id, unsigned n,
+                                                    const char *op)
+{
+    static int reported = 0;
+    if (__atomic_exchange_n(&reported, 1, __ATOMIC_ACQ_REL))
+        return;
+    fprintf(stderr,
+            "[eagain_stall] rank=%d ctxt=%d op=%s retries=%u "
+            "(unbounded EAGAIN retry; own-ctxt progress only)\n",
+            ompi_comm_rank(MPI_COMM_WORLD), ctxt_id, op ? op : "?", n);
+    fflush(stderr);
+}
+
+__opal_attribute_always_inline__ static inline void
+ompi_mtl_ofi_eagain_sweep_peers(int ctxt_id)
+{
+    int j, n = ompi_mtl_ofi.total_ctxts_used;
+
+    for (j = 1; j < n; j++) {
+        int k = (ctxt_id + j) % n;
+        if (mtl_ofi_cq_context_trylock_multicontext(k)) {
+            int got = ompi_mtl_ofi_context_progress(k);
+            mtl_ofi_mc_wake_cq_waiters(k, got);
+            mtl_ofi_cq_context_exit_multicontext(k);
+        }
+    }
+}
+#endif
+
 /**
  * When attempting to execute an OFI operation we need to handle
  * resource overrun cases. When a call to an OFI OP fails with -FI_EAGAIN
@@ -924,6 +1191,7 @@ ompi_mtl_ofi_progress_after_eagain(int ctxt_id)
  */
 #define MTL_OFI_RETRY_UNTIL_DONE_CTXT(FUNC, RETURN, CTXT_ID)                 \
     do {                                                                     \
+        unsigned _mtl_ofi_eagain = 0;                                        \
         do {                                                                 \
             const int _mtl_ofi_ser_post =                                    \
                 (ompi_mtl_ofi_lithe_multicontext_active() &&                  \
@@ -941,6 +1209,36 @@ ompi_mtl_ofi_progress_after_eagain(int ctxt_id)
             }                                                                \
             if (OPAL_LIKELY(RETURN == -FI_EAGAIN)) {                         \
                 ompi_mtl_ofi_progress_after_eagain(CTXT_ID);                 \
+                ++_mtl_ofi_eagain;                                           \
+                /* Diagnostic only (default off); see                        \
+                 * ompi_mtl_ofi_eagain_stall_threshold(). */                 \
+                if (OPAL_UNLIKELY(                                           \
+                        ompi_mtl_ofi_eagain_stall_threshold() &&             \
+                        _mtl_ofi_eagain ==                                   \
+                            ompi_mtl_ofi_eagain_stall_threshold())) {        \
+                    ompi_mtl_ofi_eagain_stall_report(CTXT_ID,                \
+                                                     _mtl_ofi_eagain,        \
+                                                     __func__);              \
+                }                                                            \
+                /* Stalled retry: reach the hartless peer's CQ ourselves.    \
+                 * Every 16th so a one-shot EAGAIN stays own-ctxt-only. */    \
+                if (ompi_mtl_ofi_eagain_sweep_enabled() &&                   \
+                    ompi_mtl_ofi.hosted_multi_ep &&                          \
+                    (_mtl_ofi_eagain & 15u) == 15u) {                        \
+                    ompi_mtl_ofi_eagain_sweep_peers(CTXT_ID);                \
+                }                                                            \
+                /* Hart donation. KNOWN BAD on its own — f3TbkdQWwETh hung in \
+                 * [halo] postall#1 at P16K4 V=4 with only this armed, where  \
+                 * the un-yielded loop reaches CG iter 1 in ~6 s. This retry  \
+                 * IS the queue's progress engine; standing aside means       \
+                 * nobody drains. Kept behind the flag as the control for the \
+                 * sweep above, not as a fix. */                              \
+                if (ompi_mtl_ofi_starve_yield_enabled() &&                    \
+                    (_mtl_ofi_eagain & 255u) == 0u &&                        \
+                    (lithe_fork_join_should_yield_to_runnable() ||            \
+                     lithe_fork_join_current_runnable_count() > 0)) {         \
+                    lithe_context_yield();                                    \
+                }                                                            \
             }                                                                \
         } while (OPAL_LIKELY(-FI_EAGAIN == RETURN));                        \
     } while (0)
