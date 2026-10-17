@@ -288,6 +288,41 @@ int opal_progress_block(void)
 #endif
     }
 
+#if HAVE_LITHE
+    /*
+     * LITHE_PROGRESS_YIELD_IDLE_AWARE (2026-10-16, docs/GAPS.md C11 part 3).
+     * This tail is reached on every empty progress pass of a single-OS rank
+     * waiting in sync_wait_st (ob1/sm, one rank per process): the primary
+     * yielded its hart on each pass, i.e. enqueue + eventfd poke + re-enter
+     * + epoll_wait(0) + dequeue, and inside a parallel region (GROMACS PME
+     * MPI_Alltoall while the workers sit at an omp barrier) that is pure
+     * overhead: no peer of this sched is waiting for a hart. Yield only when
+     * a RUNNABLE peer has no idle hart to serve it
+     * (lithe_fork_join_current_hartless_runnable, liblithe); co-resident
+     * hosted ranks still get the hart (they are hartless-runnable). Measured
+     * with the no-rebuild proxy LITHE_MTL_OFI_SINGLE_OS=1 (cpu_relax instead
+     * of this yield): GROMACS NP=2 OMP=4 4 harts 293 -> 309-310 ns/day
+     * (vanilla 303-309). A/B with this gate (2026-10-16, 3 reps, vanilla
+     * 302-312): 4 harts 293-295 -> 310 (parity), 5 harts 274-276 -> 287-288;
+     * NP=1 unchanged (180). DEFAULT 1; 0 = old unconditional yield.
+     */
+    {
+        static int idle_aware = -1;
+        if (idle_aware < 0) {
+            const char *e = getenv("LITHE_PROGRESS_YIELD_IDLE_AWARE");
+            idle_aware = (e && *e) ? (atoi(e) != 0) : 1;
+        }
+        if (idle_aware) {
+            extern long lithe_fork_join_current_hartless_runnable(void);
+            if (lithe_fork_join_current_hartless_runnable() <= 0) {
+#if defined(__x86_64__) || defined(__i386__)
+                __asm__ __volatile__("pause" ::: "memory");
+#endif
+                return 0;
+            }
+        }
+    }
+#endif
     opal_thread_yield();
     return 0;
 }

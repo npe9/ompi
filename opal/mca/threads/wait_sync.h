@@ -39,6 +39,7 @@
 #include <stdlib.h>
 #include <lithe/fork_join_sched.h>
 #include <lithe/lithe.h>
+#include <lithe/sched_trace.h> /* Perfetto trace points, no-op unless LITHE_SCHED_TRACE=1 */
 #include <parlib/arch.h> /* cpu_relax */
 #endif
 
@@ -66,6 +67,59 @@ typedef struct ompi_wait_sync_t {
  * as possible. Note that the race window is small so spinning here
  * is more optimal than sleeping since this macro is called in
  * the critical path. */
+#if HAVE_LITHE
+/* LITHE_WAIT_SYNC_RELEASE_YIELD (2026-10-16). Default ON since the A/B below;
+ * =0 restores the upstream spin for comparison.
+ *
+ * The spin on (sync)->signaling assumes the signaler is another OS thread
+ * that the kernel will run. With hosted ranks it is a co-resident Lithe
+ * context: WAIT_SYNC_SIGNAL takes (sync)->lock, a BLOCKING lithe mutex, and
+ * if the waiter still held it the signaler blocked and was re-queued RUNNABLE
+ * on the vcore it was running on -- which is the waiter's own vcore. The
+ * waiter then spins here on that very hart, never yields, and the signaler
+ * never runs: permanent hang with sync->count == 0.
+ *
+ * Caught on the login node, hosted miniFE RPH4 on 3 harts, NX80 make_local,
+ * 5/9 runs of the production binary (.build_logs/login_smoke/makelocal_hang/
+ * stale0_r8.inspect.txt): rank 3 spinning at request.h WAIT_SYNC_RELEASE
+ * inside MPI_Allreduce; rank 1 queued RUNNABLE on rank 3's vcore with the
+ * stack  lithe_mutex_lock <- wait_sync_update <- ompi_request_complete
+ * <- ompi_mtl_ofi_hosted_sc_try_send (same-process delivery of the message
+ * rank 3 was waiting for); two other ranks already past the Allreduce in the
+ * next barrier. Same signature as the P24K4 "contexts frozen in sync_os"
+ * campaign wedge (ROOT_CAUSE_HART_OVERSUBSCRIPTION.md Evidence 1).
+ *
+ * Yielding here is legal (uthread context, inside an MPI call) and cheap:
+ * the window is normally sub-microsecond, and a yield with nothing else
+ * runnable returns immediately.
+ *
+ * A/B, login node, tests/hosted_stress/allreduce_stress.cpp (4 contexts on 3
+ * harts, 20000 Allreduces): gate off hung 8/8 before iteration 5000; gate on
+ * finished 8/8 in 0.46 s (23 us/op). .build_logs/login_smoke/makelocal_hang/
+ * wsr*_r*.log, docs/GAPS.md B16. */
+static inline int lithe_wait_sync_release_yield_enabled(void)
+{
+    static int cached = -1;
+    if (OPAL_UNLIKELY(cached < 0)) {
+        const char *e = getenv("LITHE_WAIT_SYNC_RELEASE_YIELD");
+        cached = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
+    }
+    return cached;
+}
+#define WAIT_SYNC_RELEASE(sync)                                \
+    if (opal_using_threads()) {                                \
+        while ((sync)->signaling) {                            \
+            if (lithe_wait_sync_release_yield_enabled()) {     \
+                lithe_context_yield();                         \
+            } else if (opal_progress_yield_when_idle) {        \
+                opal_thread_yield();                           \
+            }                                                  \
+            continue;                                          \
+        }                                                      \
+        opal_thread_internal_cond_destroy(&(sync)->condition); \
+        opal_thread_internal_mutex_destroy(&(sync)->lock);     \
+    }
+#else
 #define WAIT_SYNC_RELEASE(sync)                                \
     if (opal_using_threads()) {                                \
         while ((sync)->signaling) {                            \
@@ -77,6 +131,7 @@ typedef struct ompi_wait_sync_t {
         opal_thread_internal_cond_destroy(&(sync)->condition); \
         opal_thread_internal_mutex_destroy(&(sync)->lock);     \
     }
+#endif /* HAVE_LITHE */
 
 #define WAIT_SYNC_RELEASE_NOWAIT(sync)                         \
     if (opal_using_threads()) {                                \
@@ -103,6 +158,11 @@ OPAL_DECLSPEC extern ompi_wait_sync_t *opal_threads_base_wait_sync_list;
 OPAL_DECLSPEC int ompi_sync_wait_mt(ompi_wait_sync_t *sync);
 static inline int sync_wait_st(ompi_wait_sync_t *sync)
 {
+#if HAVE_LITHE
+    uint32_t _lt_key = 0; int _lt_on = lithe_sched_trace_enabled();
+    if (_lt_on) { _lt_key = lithe_sched_trace_ctx_key();
+        lithe_sched_trace_emit(LITHE_ST_WAIT_SYNC_BLOCK, NULL, _lt_key, 0, (int32_t)(((uintptr_t) sync >> 4) & 0x7fffffff)); }
+#endif
     assert(NULL == opal_threads_base_wait_sync_list);
     assert(NULL == sync->next);
     opal_threads_base_wait_sync_list = sync;
@@ -138,7 +198,11 @@ static inline int sync_wait_st(ompi_wait_sync_t *sync)
     }
     opal_threads_base_wait_sync_list = NULL;
 
-    return sync->status;
+    {
+#if HAVE_LITHE
+        if (_lt_on) lithe_sched_trace_emit(LITHE_ST_WAIT_SYNC_WAKE, NULL, _lt_key, 0, 0);
+#endif
+        return sync->status; }
 }
 
 #define WAIT_SYNC_INIT(sync, c)                                    \

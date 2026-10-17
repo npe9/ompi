@@ -17,6 +17,9 @@
  */
 
 #include "opal/mca/threads/wait_sync.h"
+#if HAVE_LITHE
+#include <lithe/sched_trace.h>
+#endif
 
 #include <stdlib.h>
 #include <time.h>
@@ -67,12 +70,21 @@ static opal_atomic_int32_t num_thread_in_progress = 0;
 
 int ompi_sync_wait_mt(ompi_wait_sync_t *sync)
 {
+#if HAVE_LITHE
+    uint32_t _lt_key = 0; int _lt_on = lithe_sched_trace_enabled();
+    if (_lt_on) { _lt_key = lithe_sched_trace_ctx_key();
+        lithe_sched_trace_emit(LITHE_ST_WAIT_SYNC_BLOCK, NULL, _lt_key, 0, (int32_t)(((uintptr_t) sync >> 4) & 0x7fffffff)); }
+#endif
     /* Don't stop if the waiting synchronization is completed. We avoid the
      * race condition around the release of the synchronization using the
      * signaling field.
      */
     if (sync->count <= 0) {
-        return (0 == sync->status) ? OPAL_SUCCESS : OPAL_ERROR;
+        {
+#if HAVE_LITHE
+        if (_lt_on) lithe_sched_trace_emit(LITHE_ST_WAIT_SYNC_WAKE, NULL, _lt_key, 0, 0);
+#endif
+        return (0 == sync->status) ? OPAL_SUCCESS : OPAL_ERROR; }
     }
 
     /* lock so nobody can signal us during the list updating */
@@ -83,7 +95,11 @@ int ompi_sync_wait_mt(ompi_wait_sync_t *sync)
      */
     if (sync->count <= 0) {
         opal_thread_internal_mutex_unlock(&sync->lock);
-        return (0 == sync->status) ? OPAL_SUCCESS : OPAL_ERROR;
+        {
+#if HAVE_LITHE
+        if (_lt_on) lithe_sched_trace_emit(LITHE_ST_WAIT_SYNC_WAKE, NULL, _lt_key, 0, 0);
+#endif
+        return (0 == sync->status) ? OPAL_SUCCESS : OPAL_ERROR; }
     }
 
     /* Insert sync on the list of pending synchronization constructs */
@@ -273,5 +289,9 @@ i_am_done:
     }
     OPAL_THREAD_UNLOCK(&wait_sync_lock);
 
-    return (0 == sync->status) ? OPAL_SUCCESS : OPAL_ERROR;
+    {
+#if HAVE_LITHE
+        if (_lt_on) lithe_sched_trace_emit(LITHE_ST_WAIT_SYNC_WAKE, NULL, _lt_key, 0, 0);
+#endif
+        return (0 == sync->status) ? OPAL_SUCCESS : OPAL_ERROR; }
 }
