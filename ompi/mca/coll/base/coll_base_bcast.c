@@ -256,7 +256,7 @@ ompi_coll_base_bcast_intra_bintree ( void* buffer,
 {
     int segcount = count;
     size_t typelng;
-    mca_coll_base_comm_t *data = module->base_data;
+    mca_coll_base_comm_t *data = ompi_coll_base_comm_topo(comm, module);
 
     COLL_BASE_UPDATE_BINTREE( comm, module, root );
 
@@ -284,7 +284,7 @@ ompi_coll_base_bcast_intra_pipeline( void* buffer,
 {
     int segcount = count;
     size_t typelng;
-    mca_coll_base_comm_t *data = module->base_data;
+    mca_coll_base_comm_t *data = ompi_coll_base_comm_topo(comm, module);
 
     COLL_BASE_UPDATE_PIPELINE( comm, module, root );
 
@@ -312,7 +312,7 @@ ompi_coll_base_bcast_intra_chain( void* buffer,
 {
     int segcount = count;
     size_t typelng;
-    mca_coll_base_comm_t *data = module->base_data;
+    mca_coll_base_comm_t *data = ompi_coll_base_comm_topo(comm, module);
 
     COLL_BASE_UPDATE_CHAIN( comm, module, root, chains );
 
@@ -340,7 +340,7 @@ ompi_coll_base_bcast_intra_binomial( void* buffer,
 {
     int segcount = count;
     size_t typelng;
-    mca_coll_base_comm_t *data = module->base_data;
+    mca_coll_base_comm_t *data = ompi_coll_base_comm_topo(comm, module);
 
     COLL_BASE_UPDATE_BMTREE( comm, module, root );
 
@@ -388,7 +388,7 @@ ompi_coll_base_bcast_intra_split_bintree ( void* buffer,
 
     /* setup the binary tree topology. */
     COLL_BASE_UPDATE_BINTREE( comm, module, root );
-    tree = module->base_data->cached_bintree;
+    tree = ompi_coll_base_comm_topo(comm, module)->cached_bintree;
 
     err = ompi_datatype_type_size( datatype, &type_size );
 
@@ -724,7 +724,7 @@ int ompi_coll_base_bcast_intra_knomial(
 {
     int segcount = count;
     size_t typesize;
-    mca_coll_base_comm_t *data = module->base_data;
+    mca_coll_base_comm_t *data = ompi_coll_base_comm_topo(comm, module);
 
     COLL_BASE_UPDATE_KMTREE(comm, module, root, radix);
     if (NULL == data->cached_kmtree) {

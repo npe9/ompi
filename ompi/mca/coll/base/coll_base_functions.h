@@ -326,7 +326,7 @@ END_C_DECLS
 
 #define COLL_BASE_UPDATE_BINTREE( OMPI_COMM, BASE_MODULE, ROOT )	\
 do {                                                                                       \
-    mca_coll_base_comm_t* coll_comm = (BASE_MODULE)->base_data;                        \
+    mca_coll_base_comm_t* coll_comm = ompi_coll_base_comm_topo((OMPI_COMM), (BASE_MODULE));\
     if( !( (coll_comm->cached_bintree)                                                     \
            && (coll_comm->cached_bintree_root == (ROOT)) ) ) {                             \
         if( coll_comm->cached_bintree ) { /* destroy previous binomial if defined */       \
@@ -339,7 +339,7 @@ do {                                                                            
 
 #define COLL_BASE_UPDATE_BMTREE( OMPI_COMM, BASE_MODULE, ROOT )	\
 do {                                                                                         \
-    mca_coll_base_comm_t* coll_comm = (BASE_MODULE)->base_data;                           \
+    mca_coll_base_comm_t* coll_comm = ompi_coll_base_comm_topo((OMPI_COMM), (BASE_MODULE));\
     if( !( (coll_comm->cached_bmtree)                                                        \
            && (coll_comm->cached_bmtree_root == (ROOT)) ) ) {                                \
         if( coll_comm->cached_bmtree ) { /* destroy previous binomial if defined */          \
@@ -352,7 +352,7 @@ do {                                                                            
 
 #define COLL_BASE_UPDATE_IN_ORDER_BMTREE( OMPI_COMM, BASE_MODULE, ROOT ) \
 do {                                                                                         \
-    mca_coll_base_comm_t* coll_comm = (BASE_MODULE)->base_data;                           \
+    mca_coll_base_comm_t* coll_comm = ompi_coll_base_comm_topo((OMPI_COMM), (BASE_MODULE));\
     if( !( (coll_comm->cached_in_order_bmtree)                                               \
            && (coll_comm->cached_in_order_bmtree_root == (ROOT)) ) ) {                       \
         if( coll_comm->cached_in_order_bmtree ) { /* destroy previous binomial if defined */ \
@@ -365,7 +365,7 @@ do {                                                                            
 
 #define COLL_BASE_UPDATE_KMTREE(OMPI_COMM, BASE_MODULE, ROOT, RADIX)	\
 do {                                                                                         \
-    mca_coll_base_comm_t* coll_comm = (BASE_MODULE)->base_data;                           \
+    mca_coll_base_comm_t* coll_comm = ompi_coll_base_comm_topo((OMPI_COMM), (BASE_MODULE));\
     if (!((coll_comm->cached_kmtree)                                                       \
            && (coll_comm->cached_kmtree_root == (ROOT))                                     \
            && (coll_comm->cached_kmtree_radix == (RADIX))))                                   \
@@ -381,7 +381,7 @@ do {                                                                            
 
 #define COLL_BASE_UPDATE_PIPELINE( OMPI_COMM, BASE_MODULE, ROOT )	\
 do {                                                                                             \
-    mca_coll_base_comm_t* coll_comm = (BASE_MODULE)->base_data;                               \
+    mca_coll_base_comm_t* coll_comm = ompi_coll_base_comm_topo((OMPI_COMM), (BASE_MODULE));\
     if( !( (coll_comm->cached_pipeline)                                                          \
            && (coll_comm->cached_pipeline_root == (ROOT)) ) ) {                                  \
         if (coll_comm->cached_pipeline) { /* destroy previous pipeline if defined */             \
@@ -394,7 +394,7 @@ do {                                                                            
 
 #define COLL_BASE_UPDATE_CHAIN( OMPI_COMM, BASE_MODULE, ROOT, FANOUT )	\
 do {                                                                                             \
-    mca_coll_base_comm_t* coll_comm = (BASE_MODULE)->base_data;                               \
+    mca_coll_base_comm_t* coll_comm = ompi_coll_base_comm_topo((OMPI_COMM), (BASE_MODULE));\
     if( !( (coll_comm->cached_chain)                                                             \
            && (coll_comm->cached_chain_root == (ROOT))                                           \
            && (coll_comm->cached_chain_fanout == (FANOUT)) ) ) {                                 \
@@ -409,7 +409,7 @@ do {                                                                            
 
 #define COLL_BASE_UPDATE_IN_ORDER_BINTREE( OMPI_COMM, BASE_MODULE )	\
 do {                                                                           \
-    mca_coll_base_comm_t* coll_comm = (BASE_MODULE)->base_data;             \
+    mca_coll_base_comm_t* coll_comm = ompi_coll_base_comm_topo((OMPI_COMM), (BASE_MODULE));\
     if( !(coll_comm->cached_in_order_bintree) ) {                              \
         /* In-order binary tree topology is defined by communicator size */    \
         /* Thus, there is no need to destroy anything */                       \
@@ -556,5 +556,7 @@ static inline void ompi_coll_base_free_reqs(ompi_request_t **reqs, int count)
  * or if its size was too small, allocate it to fit the requested size.
  */
 ompi_request_t** ompi_coll_base_comm_get_reqs(mca_coll_base_comm_t* data, int nreqs);
+mca_coll_base_comm_t *ompi_coll_base_comm_topo(struct ompi_communicator_t *comm,
+                                               mca_coll_base_module_t *module);
 
 #endif /* MCA_COLL_BASE_EXPORT_H */

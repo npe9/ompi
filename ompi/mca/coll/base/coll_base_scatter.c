@@ -67,7 +67,7 @@ ompi_coll_base_scatter_intra_binomial(
     mca_coll_base_module_t *module)
 {
     mca_coll_base_module_t *base_module = (mca_coll_base_module_t*)module;
-    mca_coll_base_comm_t *data = base_module->base_data;
+    mca_coll_base_comm_t *data = ompi_coll_base_comm_topo(comm, base_module);
     int line = -1, rank, vrank, size, err, packed_size, curr_count;
     char *ptmp, *tempbuf = NULL;
     size_t max_data, packed_sizet;

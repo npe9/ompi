@@ -392,7 +392,7 @@ int ompi_coll_base_reduce_intra_chain( const void *sendbuf, void *recvbuf, int c
     int segcount = count;
     size_t typelng;
     mca_coll_base_module_t *base_module = (mca_coll_base_module_t*) module;
-    mca_coll_base_comm_t *data = base_module->base_data;
+    mca_coll_base_comm_t *data = ompi_coll_base_comm_topo(comm, base_module);
 
     OPAL_OUTPUT((ompi_coll_base_framework.framework_output,"coll:base:reduce_intra_chain rank %d fo %d ss %5d", ompi_comm_rank(comm), fanout, segsize));
 
@@ -422,7 +422,7 @@ int ompi_coll_base_reduce_intra_pipeline( const void *sendbuf, void *recvbuf,
     int segcount = count;
     size_t typelng;
     mca_coll_base_module_t *base_module = (mca_coll_base_module_t*) module;
-    mca_coll_base_comm_t *data = base_module->base_data;
+    mca_coll_base_comm_t *data = ompi_coll_base_comm_topo(comm, base_module);
 
     OPAL_OUTPUT((ompi_coll_base_framework.framework_output,"coll:base:reduce_intra_pipeline rank %d ss %5d",
                  ompi_comm_rank(comm), segsize));
@@ -453,7 +453,7 @@ int ompi_coll_base_reduce_intra_binary( const void *sendbuf, void *recvbuf,
     int segcount = count;
     size_t typelng;
     mca_coll_base_module_t *base_module = (mca_coll_base_module_t*) module;
-    mca_coll_base_comm_t *data = base_module->base_data;
+    mca_coll_base_comm_t *data = ompi_coll_base_comm_topo(comm, base_module);
 
     OPAL_OUTPUT((ompi_coll_base_framework.framework_output,"coll:base:reduce_intra_binary rank %d ss %5d",
                  ompi_comm_rank(comm), segsize));
@@ -484,7 +484,7 @@ int ompi_coll_base_reduce_intra_binomial( const void *sendbuf, void *recvbuf,
     int segcount = count;
     size_t typelng;
     mca_coll_base_module_t *base_module = (mca_coll_base_module_t*) module;
-    mca_coll_base_comm_t *data = base_module->base_data;
+    mca_coll_base_comm_t *data = ompi_coll_base_comm_topo(comm, base_module);
 
     OPAL_OUTPUT((ompi_coll_base_framework.framework_output,"coll:base:reduce_intra_binomial rank %d ss %5d",
                  ompi_comm_rank(comm), segsize));
@@ -526,7 +526,7 @@ int ompi_coll_base_reduce_intra_in_order_binary( const void *sendbuf, void *recv
     char *tmpbuf_free = NULL;
     size_t typelng;
     mca_coll_base_module_t *base_module = (mca_coll_base_module_t*) module;
-    mca_coll_base_comm_t *data = base_module->base_data;
+    mca_coll_base_comm_t *data = ompi_coll_base_comm_topo(comm, base_module);
 
     rank = ompi_comm_rank(comm);
     size = ompi_comm_size(comm);
