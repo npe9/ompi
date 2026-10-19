@@ -32,6 +32,8 @@
 #define OPAL_HWLOC_WANT_SHMEM 1
 
 #include "opal_config.h"
+#include <stdio.h>
+#include <unistd.h>
 
 #ifdef HAVE_SYS_TYPES_H
 #    include <sys/types.h>
@@ -310,6 +312,22 @@ int opal_hwloc_base_get_topology(void)
             || 0 != hwloc_topology_load(opal_hwloc_topology)) {
             OPAL_ERROR_LOG(OPAL_ERR_NOT_SUPPORTED);
             return OPAL_ERR_NOT_SUPPORTED;
+        }
+        /* Hosted Lithe topology cache (ompi_rte.c ompi_lithe_topo_cache_prepare):
+         * publish this discovery for the next process on the node. Written to a
+         * private temp name and renamed, so a reader never sees a partial file. */
+        {
+            const char *cw = getenv("OMPI_LITHE_TOPO_CACHE_WRITE");
+            if (NULL != cw && '\0' != cw[0]) {
+                char tmp[300];
+                snprintf(tmp, sizeof(tmp), "%s.%d.tmp", cw, (int) getpid());
+                if (0 == hwloc_topology_export_xml(opal_hwloc_topology, tmp, 0)) {
+                    if (0 != rename(tmp, cw)) {
+                        unlink(tmp);
+                    }
+                }
+                unsetenv("OMPI_LITHE_TOPO_CACHE_WRITE");
+            }
         }
         /* filter the cpus thru any default cpu set */
         if (OPAL_SUCCESS != (rc = opal_hwloc_base_filter_cpus(opal_hwloc_topology))) {

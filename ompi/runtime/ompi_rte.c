@@ -94,6 +94,42 @@ static bool fns_init=false;
 static opal_tsd_tracked_key_t print_args_tsd_key;
 static char* opal_print_args_null = "NULL";
 
+#include <sched.h>
+static void ompi_lithe_topo_cache_prepare(void)
+{
+    const char *rph = getenv("LITHE_CONTEXT_RANKS_PER_HOST");
+    const char *off = getenv("OMPI_LITHE_TOPO_CACHE");
+    if (NULL == rph || atoi(rph) < 2 || (off && '0' == off[0]) || getenv("HWLOC_XMLFILE")) {
+        return;
+    }
+    char boot[64] = "noboot";
+    FILE *f = fopen("/proc/sys/kernel/random/boot_id", "r");
+    if (f) {
+        if (NULL == fgets(boot, sizeof(boot), f)) {
+            strcpy(boot, "noboot");
+        }
+        fclose(f);
+        boot[strcspn(boot, "\n")] = '\0';
+    }
+    cpu_set_t m;
+    unsigned long long h = 1469598103934665603ull; /* FNV-1a over the mask */
+    if (0 == sched_getaffinity(0, sizeof(m), &m)) {
+        const unsigned char *b = (const unsigned char *) &m;
+        for (size_t i = 0; i < sizeof(m); i++) {
+            h = (h ^ b[i]) * 1099511628211ull;
+        }
+    }
+    char path[256];
+    snprintf(path, sizeof(path), "/dev/shm/ompi-lithe-topo-%u-%s-%016llx.xml",
+             (unsigned) getuid(), boot, h);
+    if (0 == access(path, R_OK)) {
+        setenv("HWLOC_XMLFILE", path, 0);
+        setenv("HWLOC_THISSYSTEM", "1", 0);
+    } else {
+        setenv("OMPI_LITHE_TOPO_CACHE_WRITE", path, 1);
+    }
+}
+
 static uint32_t ompi_lithe_context_ranks_per_host(void)
 {
     char *env = getenv("LITHE_CONTEXT_RANKS_PER_HOST");
@@ -592,6 +628,14 @@ int ompi_rte_init(int *pargc, char ***pargv)
     opal_convert_process_name_to_string = _convert_process_name_to_string;
     opal_snprintf_jobid = ompi_pmix_snprintf_jobid;
     opal_convert_string_to_jobid = _convert_string_to_jobid;
+
+    /* Hosted Lithe ranks (2026-10-19): reuse a per-node hwloc topology XML so the
+     * PMIx and OPAL discoveries (two full scans in a singleton-style hosted
+     * launch, ~400 ms of a ~600 ms MPI_Init on the login node) load XML instead.
+     * Keyed by uid, boot id and this process's CPU mask (a different mask sees a
+     * different allowed set). OPAL writes the file after its first discovery.
+     * OMPI_LITHE_TOPO_CACHE=0 disables; an explicit HWLOC_XMLFILE wins. */
+    ompi_lithe_topo_cache_prepare();
 
     /* initialize the opal layer */
     if (OPAL_SUCCESS != (ret = opal_init(pargc, pargv))) {
