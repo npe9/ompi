@@ -1795,7 +1795,7 @@ error:
  * the CXI driver, and those waits overlap across threads but not within one: 8 endpoints
  * 213-221 ms sequential vs 45 ms concurrent (bench/alt/cxi_eq_free.c). Each job closes one
  * context's EP then its CQ (the order the OFI spec requires); contexts are independent.
- * Runs on parlib's offload helpers; opt-in, OMPI_LITHE_PARALLEL_CLOSE=1 (see the call site). */
+ * Runs on parlib's offload helpers; OMPI_LITHE_PARALLEL_CLOSE=0 keeps the sequential loop. */
 extern int parlib_blocking_call_many(void (*fn)(void *), void **args, int n) __attribute__((weak));
 struct mtl_ofi_close_job { int ctxt; int ret; };
 static void mtl_ofi_close_ctxt_job(void *x)
@@ -1836,11 +1836,11 @@ ompi_mtl_ofi_finalize(struct mca_mtl_base_module_t *mtl)
         int i;
         const char *pc = getenv("OMPI_LITHE_PARALLEL_CLOSE");
         int n = ompi_mtl_ofi.num_ofi_contexts;
-        /* OPT-IN (OMPI_LITHE_PARALLEL_CLOSE=1): 10 runs, 8 contexts: 5/10 finalize in
-         * 48-76 ms, 5/10 in 1.8-3.3 s (sequential 282-1106 ms). The tail is not understood
-         * yet (helpers spin-yielding on the lithified AV lock while cxip_pte_set_state_wait
-         * waits for an event is the suspect), so the sequential loop stays the default. */
-        if (parlib_blocking_call_many && n > 1 && pc && '1' == pc[0]) {
+        /* Default on (OMPI_LITHE_PARALLEL_CLOSE=0 disables). 8 contexts / 4 harts, 10 runs:
+         * 53-73 ms vs 235-307 sequential; 16 / 4: 64-283; 8 / 2: 42-147; 4 / 4: 39-76. An
+         * earlier 1.8-3.3 s tail was the helpers convoying on libfabric's mm_list lithe
+         * mutex (fixed in liblithe's lithe_mutex_lock). */
+        if (parlib_blocking_call_many && n > 1 && !(pc && '0' == pc[0])) {
             struct mtl_ofi_close_job *jobs = calloc((size_t) n, sizeof(*jobs));
             void **args = calloc((size_t) n, sizeof(*args));
             ret = 0;
