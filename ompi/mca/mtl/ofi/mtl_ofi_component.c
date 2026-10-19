@@ -1789,6 +1789,36 @@ error:
     return NULL;
 }
 
+#if HAVE_LITHE
+/* Hosted multi-EP teardown in parallel (2026-10-19, GAPS B29). Each rank context's CQ has
+ * an FD wait object (so contexts can park on it); closing such an endpoint waits ~27 ms in
+ * the CXI driver, and those waits overlap across threads but not within one: 8 endpoints
+ * 213-221 ms sequential vs 45 ms concurrent (bench/alt/cxi_eq_free.c). Each job closes one
+ * context's EP then its CQ (the order the OFI spec requires); contexts are independent.
+ * Runs on parlib's offload helpers; opt-in, OMPI_LITHE_PARALLEL_CLOSE=1 (see the call site). */
+extern int parlib_blocking_call_many(void (*fn)(void *), void **args, int n) __attribute__((weak));
+struct mtl_ofi_close_job { int ctxt; int ret; };
+static void mtl_ofi_close_ctxt_job(void *x)
+{
+    struct mtl_ofi_close_job *j = (struct mtl_ofi_close_job *) x;
+    int i = j->ctxt;
+    j->ret = 0;
+    if (NULL != ompi_mtl_ofi.ofi_ctxt[i].tx_ep) {
+        if ((j->ret = fi_close((fid_t) ompi_mtl_ofi.ofi_ctxt[i].tx_ep))) {
+            return;
+        }
+        ompi_mtl_ofi.ofi_ctxt[i].tx_ep = NULL;
+        ompi_mtl_ofi.ofi_ctxt[i].rx_ep = NULL;
+    }
+    if (NULL != ompi_mtl_ofi.ofi_ctxt[i].cq) {
+        if ((j->ret = fi_close((fid_t) ompi_mtl_ofi.ofi_ctxt[i].cq))) {
+            return;
+        }
+        ompi_mtl_ofi.ofi_ctxt[i].cq = NULL;
+    }
+}
+#endif
+
 int
 ompi_mtl_ofi_finalize(struct mca_mtl_base_module_t *mtl)
 {
@@ -1804,7 +1834,37 @@ ompi_mtl_ofi_finalize(struct mca_mtl_base_module_t *mtl)
 #if HAVE_LITHE
     if (ompi_mtl_ofi.hosted_multi_ep) {
         int i;
-        /* Close each regular EP then its CQ (EPs share the AV). */
+        const char *pc = getenv("OMPI_LITHE_PARALLEL_CLOSE");
+        int n = ompi_mtl_ofi.num_ofi_contexts;
+        /* OPT-IN (OMPI_LITHE_PARALLEL_CLOSE=1): 10 runs, 8 contexts: 5/10 finalize in
+         * 48-76 ms, 5/10 in 1.8-3.3 s (sequential 282-1106 ms). The tail is not understood
+         * yet (helpers spin-yielding on the lithified AV lock while cxip_pte_set_state_wait
+         * waits for an event is the suspect), so the sequential loop stays the default. */
+        if (parlib_blocking_call_many && n > 1 && pc && '1' == pc[0]) {
+            struct mtl_ofi_close_job *jobs = calloc((size_t) n, sizeof(*jobs));
+            void **args = calloc((size_t) n, sizeof(*args));
+            ret = 0;
+            if (jobs && args) {
+                for (i = 0; i < n; ++i) {
+                    jobs[i].ctxt = i;
+                    args[i] = &jobs[i];
+                }
+                (void) parlib_blocking_call_many(mtl_ofi_close_ctxt_job, args, n);
+                ret = 0;
+                for (i = 0; i < n; ++i) {
+                    if (jobs[i].ret) {
+                        ret = jobs[i].ret;
+                    }
+                }
+            }
+            free(jobs);
+            free(args);
+            if (ret) {
+                goto finalize_err;
+            }
+        }
+        /* Close each regular EP then its CQ (EPs share the AV). Anything the parallel
+         * path closed is NULL already. */
         for (i = 0; i < ompi_mtl_ofi.num_ofi_contexts; ++i) {
             if (NULL != ompi_mtl_ofi.ofi_ctxt[i].tx_ep) {
                 if ((ret = fi_close((fid_t) ompi_mtl_ofi.ofi_ctxt[i].tx_ep))) {
