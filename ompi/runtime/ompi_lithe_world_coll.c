@@ -257,7 +257,20 @@ static int32_t sc_coll_gate_snapshot(void)
 }
 #endif /* HAVE_LITHE */
 
+/* The env reads below are cached (2026-10-21): they ran on every collective, and
+ * getenv's scan of the hosted environment was 26 % (+6 % strncmp) of a hosted
+ * 8-byte allreduce at 4 harts (perf). */
+static bool sc_flat_coll_enabled_read(void);
 static bool sc_flat_coll_enabled(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        v = sc_flat_coll_enabled_read() ? 1 : 0;
+    }
+    return v;
+}
+
+static bool sc_flat_coll_enabled_read(void)
 {
     const char *e = getenv("LITHE_HOSTED_SC_FLAT_COLL");
     if (NULL != e && '0' == e[0] && '\0' == e[1]) {
@@ -394,12 +407,19 @@ static bool sc_flat_coll_ok(struct ompi_communicator_t *comm, sc_coll_layout_t *
     if (!L->single_os) {
         return false;
     }
-    e = getenv("LITHE_HOSTED_SC_FLAT_COLL");
-    if (NULL != e && '0' == e[0] && '\0' == e[1]) {
-        return false;
+    {
+        static int v = -1;
+        if (v < 0) {
+            e = getenv("LITHE_HOSTED_SC_FLAT_COLL");
+            if (NULL != e && '0' == e[0] && '\0' == e[1]) {
+                v = 0;
+            } else {
+                e = getenv("LITHE_HOSTED_SC_FLAT_COLL_SINGLE_OS");
+                v = !(NULL != e && '0' == e[0]);
+            }
+        }
+        return v;
     }
-    e = getenv("LITHE_HOSTED_SC_FLAT_COLL_SINGLE_OS");
-    return !(NULL != e && '0' == e[0]);
 }
 
 
@@ -439,26 +459,43 @@ static bool sc_coll_layout(struct ompi_communicator_t *comm, sc_coll_layout_t *L
     L->single_os = (L->num_os == 1);
 
     /* Contiguous regular packing: rank r lives on OS floor(r/rph) with
-     * vpid == r (hosted COMM_WORLD convention). */
-    memset(os_counts, 0, sizeof(os_counts));
-    for (r = 0; r < L->size; ++r) {
-        peer = ompi_comm_peer_lookup(comm, r);
-        if (NULL == peer) {
-            return false;
-        }
-        expect = (opal_vpid_t) r;
-        if (peer->super.proc_name.vpid != expect) {
-            return false;
-        }
-        peer_os = expect / (opal_vpid_t) rph;
-        if (peer_os >= (opal_vpid_t) L->num_os) {
-            return false;
-        }
-        os_counts[peer_os]++;
-    }
-    for (r = 0; r < L->num_os; ++r) {
-        if (os_counts[r] != (int) rph) {
-            return false;
+     * vpid == r (hosted COMM_WORLD convention). O(size) per call, so COMM_WORLD's
+     * verdict is cached (2026-10-21; idempotent, a racing first fill is benign). */
+    {
+        static int world_regular = -1;
+        int is_world = comm_is_world(comm);
+        if (is_world && world_regular >= 0) {
+            if (!world_regular) {
+                return false;
+            }
+        } else {
+            int ok = 1;
+            memset(os_counts, 0, sizeof(os_counts));
+            for (r = 0; ok && r < L->size; ++r) {
+                peer = ompi_comm_peer_lookup(comm, r);
+                expect = (opal_vpid_t) r;
+                if (NULL == peer || peer->super.proc_name.vpid != expect) {
+                    ok = 0;
+                    break;
+                }
+                peer_os = expect / (opal_vpid_t) rph;
+                if (peer_os >= (opal_vpid_t) L->num_os) {
+                    ok = 0;
+                    break;
+                }
+                os_counts[peer_os]++;
+            }
+            for (r = 0; ok && r < L->num_os; ++r) {
+                if (os_counts[r] != (int) rph) {
+                    ok = 0;
+                }
+            }
+            if (is_world) {
+                world_regular = ok;
+            }
+            if (!ok) {
+                return false;
+            }
         }
     }
     /*
@@ -471,8 +508,13 @@ static bool sc_coll_layout(struct ompi_communicator_t *comm, sc_coll_layout_t *L
      * needs pow2); if A2A disabled, hybrid is unavailable.
      */
     if (!L->single_os) {
-        const char *mos = getenv("LITHE_HOSTED_SC_FLAT_MULTI_OS");
+        static int mos_read = 0;
+        static const char *mos;
         int enable = 0;
+        if (!mos_read) {
+            mos = getenv("LITHE_HOSTED_SC_FLAT_MULTI_OS");
+            mos_read = 1;
+        }
         if (NULL != mos) {
             if ('1' == mos[0] && '\0' == mos[1]) {
                 enable = 1;
@@ -492,8 +534,12 @@ static bool sc_coll_layout(struct ompi_communicator_t *comm, sc_coll_layout_t *L
             /* Non-pow2 (e.g. P24): opt-in only. Default off — enabling A2A
              * hybrid for world=96 hung P24K4 at driver/make_local on cxi
              * (COMPOSITION_BROKEN). LITHE_HOSTED_SC_NONPOW2=1 to experiment. */
-            const char *np = getenv("LITHE_HOSTED_SC_NONPOW2");
-            if (!(np && np[0] == '1' && np[1] == '\0')) {
+            static int np_on = -1;
+            if (np_on < 0) {
+                const char *np = getenv("LITHE_HOSTED_SC_NONPOW2");
+                np_on = (np && np[0] == '1' && np[1] == '\0');
+            }
+            if (!np_on) {
                 return false;
             }
             if (!sc_coll_leaders_a2a_wanted(L->num_os)) {

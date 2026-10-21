@@ -75,7 +75,7 @@ do {                                                                    \
         sendreq = NULL;                                                 \
     } else {                                                            \
         sendreq = (mca_pml_cm_thin_send_request_t*)                     \
-          opal_free_list_wait (&mca_pml_base_send_requests);            \
+          (mca_pml_cm_fl_get(&mca_pml_base_send_requests, &mca_pml_cm_stash_send, 1));            \
         sendreq->req_send.req_base.req_pml_type = MCA_PML_CM_REQUEST_SEND_THIN; \
         sendreq->req_mtl.ompi_req = (ompi_request_t*) sendreq;          \
         sendreq->req_mtl.completion_callback = mca_pml_cm_send_request_completion; \
@@ -86,7 +86,7 @@ do {                                                                    \
                                            ompi_proc)                   \
 do {                                                                    \
     sendreq = (mca_pml_cm_thin_send_request_t*)                         \
-        opal_free_list_wait (&mca_pml_base_send_requests);              \
+        (mca_pml_cm_fl_get(&mca_pml_base_send_requests, &mca_pml_cm_stash_send, 1));              \
     sendreq->req_send.req_base.req_pml_type = MCA_PML_CM_REQUEST_SEND_THIN; \
     sendreq->req_mtl.ompi_req = (ompi_request_t*) sendreq;              \
     sendreq->req_mtl.completion_callback = mca_pml_cm_send_request_completion; \
@@ -103,7 +103,7 @@ do {                                                                    \
         sendreq = NULL;                                                 \
     } else {                                                            \
         sendreq = (mca_pml_cm_hvy_send_request_t*)                      \
-          opal_free_list_wait (&mca_pml_base_send_requests);            \
+          (mca_pml_cm_fl_get(&mca_pml_base_send_requests, &mca_pml_cm_stash_send, 1));            \
         sendreq->req_send.req_base.req_pml_type = MCA_PML_CM_REQUEST_SEND_HEAVY; \
         sendreq->req_mtl.ompi_req = (ompi_request_t*) sendreq;          \
         sendreq->req_mtl.completion_callback = mca_pml_cm_send_request_completion; \
@@ -114,7 +114,7 @@ do {                                                                    \
                                           ompi_proc)                    \
 {                                                                       \
     sendreq = (mca_pml_cm_hvy_send_request_t*)                          \
-        opal_free_list_wait (&mca_pml_base_send_requests);              \
+        (mca_pml_cm_fl_get(&mca_pml_base_send_requests, &mca_pml_cm_stash_send, 1));              \
     sendreq->req_send.req_base.req_pml_type = MCA_PML_CM_REQUEST_SEND_HEAVY; \
     sendreq->req_mtl.ompi_req = (ompi_request_t*) sendreq;              \
     sendreq->req_mtl.completion_callback = mca_pml_cm_send_request_completion; \
@@ -132,7 +132,7 @@ do {                                                                    \
                                             count,                      \
                                             flags )                     \
 {                                                                       \
-    OBJ_RETAIN(comm);                                                   \
+    PML_CM_COMM_RETAIN(comm);                                                   \
     OMPI_DATATYPE_RETAIN(datatype);                                     \
     (req_send)->req_base.req_comm = comm;                               \
     (req_send)->req_base.req_datatype = datatype;                       \
@@ -163,7 +163,7 @@ do {                                                                    \
                                             count,                      \
                                             flags )                     \
 {                                                                       \
-    OBJ_RETAIN(comm);                                                   \
+    PML_CM_COMM_RETAIN(comm);                                                   \
     OMPI_DATATYPE_RETAIN(datatype);                                     \
     (req_send)->req_base.req_comm = comm;                               \
     (req_send)->req_base.req_datatype = datatype;                       \
@@ -196,7 +196,7 @@ do {                                                                    \
                                             count,                      \
                                             flags )                     \
 {                                                                       \
-    OBJ_RETAIN(comm);                                                   \
+    PML_CM_COMM_RETAIN(comm);                                                   \
     OMPI_DATATYPE_RETAIN(datatype);                                     \
     (req_send)->req_base.req_comm = comm;                               \
     (req_send)->req_base.req_datatype = datatype;                       \
@@ -228,7 +228,7 @@ do {                                                                    \
                                             count,                      \
                                             flags )                     \
 {                                                                       \
-    OBJ_RETAIN(comm);                                                   \
+    PML_CM_COMM_RETAIN(comm);                                                   \
     OMPI_DATATYPE_RETAIN(datatype);                                     \
     (req_send)->req_base.req_comm = comm;                               \
     (req_send)->req_base.req_datatype = datatype;                       \
@@ -456,11 +456,11 @@ do {                                                                            
     {                                                                   \
         /*  Let the base handle the reference counts */                 \
         OMPI_DATATYPE_RETAIN(sendreq->req_send.req_base.req_datatype);  \
-        OBJ_RELEASE(sendreq->req_send.req_base.req_comm);               \
+        PML_CM_COMM_RELEASE(sendreq->req_send.req_base.req_comm);               \
         OMPI_REQUEST_FINI(&sendreq->req_send.req_base.req_ompi);        \
         opal_convertor_cleanup( &(sendreq->req_send.req_base.req_convertor) ); \
-        opal_free_list_return ( &mca_pml_base_send_requests,            \
-                               (opal_free_list_item_t*)sendreq);        \
+        mca_pml_cm_fl_return(&mca_pml_base_send_requests, &mca_pml_cm_stash_send,            \
+                               (opal_free_list_item_t*)(sendreq));        \
     }
 
 /*
@@ -493,11 +493,11 @@ do {                                                                         \
     {                                                                   \
         /*  Let the base handle the reference counts */                 \
         OMPI_DATATYPE_RETAIN(sendreq->req_send.req_base.req_datatype);  \
-        OBJ_RELEASE(sendreq->req_send.req_base.req_comm);               \
+        PML_CM_COMM_RELEASE(sendreq->req_send.req_base.req_comm);               \
         OMPI_REQUEST_FINI(&sendreq->req_send.req_base.req_ompi);        \
         opal_convertor_cleanup( &(sendreq->req_send.req_base.req_convertor) ); \
-        opal_free_list_return ( &mca_pml_base_send_requests,            \
-                               (opal_free_list_item_t*)sendreq);        \
+        mca_pml_cm_fl_return(&mca_pml_base_send_requests, &mca_pml_cm_stash_send,            \
+                               (opal_free_list_item_t*)(sendreq));        \
     }
 
 extern void

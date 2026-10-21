@@ -230,16 +230,26 @@ struct mca_mtl_ofi_cid_hdr_t {
 typedef struct mca_mtl_ofi_cid_hdr_t mca_mtl_ofi_cid_hdr_t;
 
 /* Set OFI context for operations which generate completion events */
+#if HAVE_LITHE
+/* Forward decls: defined below after lithe multicontext helpers. */
+static inline int ompi_mtl_ofi_lithe_multicontext_ctxt_index(void);
+static inline int ompi_mtl_ofi_lithe_multicontext_active(void);
+#endif
+
 __opal_attribute_always_inline__ static inline void
 set_thread_context(int ctxt)
 {
+#if HAVE_LITHE
+    /* Hosted ranks: get_thread_context derives the ctxt from the vpid and never
+     * reads this, so skip the DTLS write (2026-10-21: set_dtls was ~6 % of a hosted
+     * 4 KiB halo loop, once per Isend and Irecv). */
+    if (ompi_mtl_ofi_lithe_multicontext_active() && ompi_mtl_ofi.total_ctxts_used > 0
+        && opal_lithe_env_cache_rph() >= 2UL) {
+        return; /* == ompi_mtl_ofi_lithe_multicontext_ctxt_index() >= 0 */
+    }
+#endif
     ompi_mtl_ofi_thread_ctxt_set(ctxt);
 }
-
-#if HAVE_LITHE
-/* Forward decl: defined below after lithe multicontext helpers. */
-static inline int ompi_mtl_ofi_lithe_multicontext_ctxt_index(void);
-#endif
 
 /* Retrieve OFI context to use for CQ poll */
 __opal_attribute_always_inline__ static inline void

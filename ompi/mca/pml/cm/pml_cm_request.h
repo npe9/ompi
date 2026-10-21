@@ -24,6 +24,63 @@
 #include "ompi/mca/pml/base/pml_base_bsend.h"
 #include "ompi/mca/pml/pml.h"
 #include "ompi/mca/mtl/mtl.h"
+#include "ompi/communicator/communicator.h"
+#include "opal/class/opal_free_list.h"
+
+/*
+ * LITHE_PML_CM_FAST (2026-10-21, bitmask read once at component open, default 3,
+ * =0 restores; both bits are safe in any process: intrinsic communicators outlive
+ * every request, and the stash is per thread / per Lithe context). Co-resident ranks share every per-process object, so per-request
+ * atomics that are private in a process-per-rank run bounce one cache line between
+ * harts here:
+ *  bit 1: skip the request's refcount on intrinsic communicators (world/self/null,
+ *         freed only at finalize). Every Isend/Irecv retained and released
+ *         MPI_COMM_WORLD's refcount (predefined datatypes already skip theirs).
+ *  bit 2: a per-context (__thread is per Lithe context) stash of free requests in front
+ *         of the shared send/recv free lists, whose 128-bit CAS head all ranks contend.
+ * A/B (5 reps, idle cpus): halo 4 KiB 4 ranks / 4 harts 2.15-2.45 -> 1.56-1.66 us (bit 1
+ * alone 2.0, bit 2 alone 1.7), 3 harts 4.7-4.9 -> 4.5-4.7; suite (4 reps): 8 contexts /
+ * 3 harts 6.2-6.5 -> 5.6-5.7, ranks K=8 9.04 -> 8.53 ms/iter mean, the rest unchanged.
+ */
+OMPI_DECLSPEC extern int mca_pml_cm_lithe_fast;
+#define PML_CM_COMM_RETAIN(c)                                              \
+    do {                                                                   \
+        if (!((mca_pml_cm_lithe_fast & 1) && OMPI_COMM_IS_INTRINSIC(c))) { \
+            OBJ_RETAIN(c);                                                 \
+        }                                                                  \
+    } while (0)
+#define PML_CM_COMM_RELEASE(c)                                             \
+    do {                                                                   \
+        if (!((mca_pml_cm_lithe_fast & 1) && OMPI_COMM_IS_INTRINSIC(c))) { \
+            OBJ_RELEASE(c);                                                \
+        }                                                                  \
+    } while (0)
+
+#define PML_CM_STASH_N 16
+typedef struct {
+    int n;
+    opal_free_list_item_t *it[PML_CM_STASH_N];
+} mca_pml_cm_stash_t;
+OMPI_DECLSPEC extern __thread mca_pml_cm_stash_t mca_pml_cm_stash_send, mca_pml_cm_stash_recv;
+
+static inline opal_free_list_item_t *
+mca_pml_cm_fl_get(opal_free_list_t *fl, mca_pml_cm_stash_t *st, int wait)
+{
+    if ((mca_pml_cm_lithe_fast & 2) && st->n > 0) {
+        return st->it[--st->n];
+    }
+    return wait ? opal_free_list_wait(fl) : opal_free_list_get(fl);
+}
+
+static inline void
+mca_pml_cm_fl_return(opal_free_list_t *fl, mca_pml_cm_stash_t *st, opal_free_list_item_t *it)
+{
+    if ((mca_pml_cm_lithe_fast & 2) && st->n < PML_CM_STASH_N) {
+        st->it[st->n++] = it;
+        return;
+    }
+    opal_free_list_return(fl, it);
+}
 
 /**
  * Type of request.

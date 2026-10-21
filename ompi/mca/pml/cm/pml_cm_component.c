@@ -23,6 +23,7 @@
  */
 
 #include "ompi_config.h"
+#include <stdlib.h>
 
 #include "pml_cm.h"
 #include "opal/util/event.h"
@@ -107,10 +108,17 @@ mca_pml_cm_component_register(void)
     return OPAL_SUCCESS;
 }
 
+/* LITHE_PML_CM_FAST bits, see pml_cm_request.h. Fixed before any request exists. */
+int mca_pml_cm_lithe_fast = 0;
+__thread mca_pml_cm_stash_t mca_pml_cm_stash_send, mca_pml_cm_stash_recv;
+
 static int
 mca_pml_cm_component_open(void)
 {
     int ret;
+    const char *fast = getenv("LITHE_PML_CM_FAST");
+
+    mca_pml_cm_lithe_fast = (NULL != fast) ? atoi(fast) : 3;
 
     ret = mca_base_framework_open(&ompi_mtl_base_framework, 0);
     if (OMPI_SUCCESS == ret) {
