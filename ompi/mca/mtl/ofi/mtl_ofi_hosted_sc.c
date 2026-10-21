@@ -74,7 +74,34 @@ typedef struct {
      * destination slot; the receiver does the reverse), lock-free. */
     opal_lifo_t pr_free;
     opal_lifo_t ue_free;
+    opal_atomic_lock_t spin; /* LITHE_SC_SPINLOCK: used instead of `lock` */
 } ompi_mtl_ofi_hosted_sc_slot_t;
+
+/* LITHE_SC_SPINLOCK=1 (2026-10-21, default 0 for A/B): guard the slot queues with a
+ * plain spinlock instead of opal_mutex (a Lithe MCS spin-then-block mutex, ~15 %
+ * of a hosted 4 KiB halo loop in lock/unlock). Every critical section is short
+ * and never yields; the sync-send park releases the lock from the block callback,
+ * which a spinlock allows too. NEGATIVE (4 reps; K=8 8 reps): halo 4 KiB 4.75-4.85
+ * -> 4.74-4.79 us, allreduce and 8-context halo unchanged, MPI+OpenMP 16^3 worse in
+ * 2/4 reps (0.0088 vs 0.0073-0.0076 s), ranks K=8 mean 8.93 -> 8.70 (overlapping).
+ * The lock cost in the profile is contention, which a spinlock does not remove. */
+static int sc_spin = 0;
+static inline void sc_lock(ompi_mtl_ofi_hosted_sc_slot_t *slot)
+{
+    if (sc_spin) {
+        opal_atomic_lock(&slot->spin);
+    } else {
+        sc_lock(slot);
+    }
+}
+static inline void sc_unlock(ompi_mtl_ofi_hosted_sc_slot_t *slot)
+{
+    if (sc_spin) {
+        opal_atomic_unlock(&slot->spin);
+    } else {
+        sc_unlock(slot);
+    }
+}
 
 typedef struct {
     ompi_mtl_ofi_hosted_sc_slot_t *slot;
@@ -198,12 +225,12 @@ static void sc_ssend_park_cb(lithe_context_t *context, void *arg)
     sc_ssend_park_arg_t *a = (sc_ssend_park_arg_t *) arg;
 
     if (NULL == a->sreq || a->sreq->completion_count <= 0) {
-        opal_mutex_unlock(&a->slot->lock);
+        sc_unlock(a->slot);
         lithe_context_unblock(context);
         return;
     }
     a->ue->send_waiter = context;
-    opal_mutex_unlock(&a->slot->lock);
+    sc_unlock(a->slot);
 }
 
 /* Progress calls per OFI CQ poll in a single-OS SC world (1 = every call). */
@@ -383,7 +410,10 @@ int ompi_mtl_ofi_hosted_sc_init(void)
         OBJ_CONSTRUCT(&sc_slots[i].unexpected, opal_list_t);
         OBJ_CONSTRUCT(&sc_slots[i].pr_free, opal_lifo_t);
         OBJ_CONSTRUCT(&sc_slots[i].ue_free, opal_lifo_t);
+        opal_atomic_lock_init(&sc_slots[i].spin, OPAL_ATOMIC_LOCK_UNLOCKED);
     }
+    e = getenv("LITHE_SC_SPINLOCK");
+    sc_spin = (NULL != e && '1' == e[0]);
     e = getenv("LITHE_SC_FREELIST");
     sc_freelist = (NULL != e && '0' == e[0]) ? 0 : 1;
     sc_enabled = 1;
@@ -497,7 +527,7 @@ int ompi_mtl_ofi_hosted_sc_try_send(struct ompi_communicator_t *comm, int dest,
     src_rank = ompi_mtl_ofi_comm_rank(comm);
     cid = (int) comm->c_index;
 
-    opal_mutex_lock(&slot->lock);
+    sc_lock(slot);
 
     OPAL_LIST_FOREACH_SAFE (pr, pr_next, &slot->posted,
                             ompi_mtl_ofi_hosted_sc_posted_t) {
@@ -526,7 +556,7 @@ int ompi_mtl_ofi_hosted_sc_try_send(struct ompi_communicator_t *comm, int dest,
     }
 
     if (NULL != matched_recv) {
-        opal_mutex_unlock(&slot->lock);
+        sc_unlock(slot);
         /* Cancel OFI before completion_callback (may free the request). */
         if (need_ofi_cancel && NULL != matched_comm) {
             int ctxt_id = ompi_mtl_ofi_ctxt_index_for_comm(matched_comm);
@@ -545,7 +575,7 @@ int ompi_mtl_ofi_hosted_sc_try_send(struct ompi_communicator_t *comm, int dest,
     /* Unexpected message. */
     ue = sc_ue_get(slot);
     if (NULL == ue) {
-        opal_mutex_unlock(&slot->lock);
+        sc_unlock(slot);
         ofi_req->status.MPI_ERROR = OMPI_ERR_OUT_OF_RESOURCE;
         return 1;
     }
@@ -555,7 +585,7 @@ int ompi_mtl_ofi_hosted_sc_try_send(struct ompi_communicator_t *comm, int dest,
         if (NULL == payload) {
             ue->buf = NULL;
             sc_ue_put(slot, ue);
-            opal_mutex_unlock(&slot->lock);
+            sc_unlock(slot);
             ofi_req->status.MPI_ERROR = OMPI_ERR_OUT_OF_RESOURCE;
             return 1;
         }
@@ -587,20 +617,20 @@ int ompi_mtl_ofi_hosted_sc_try_send(struct ompi_communicator_t *comm, int dest,
                 parg.sreq = ofi_req;
                 lithe_context_block(sc_ssend_park_cb, &parg);
                 /* Relock for next completion_count check / re-park. */
-                opal_mutex_lock(&slot->lock);
+                sc_lock(slot);
             }
-            opal_mutex_unlock(&slot->lock);
+            sc_unlock(slot);
             if (free_after && NULL != start) {
                 free(start);
             }
         } else {
-            opal_mutex_unlock(&slot->lock);
+            sc_unlock(slot);
         }
         return 1;
     }
 
     opal_list_append(&slot->unexpected, &ue->super);
-    opal_mutex_unlock(&slot->lock);
+    sc_unlock(slot);
     sc_finish_send(ofi_req, is_isend, free_after, start);
     return 1;
 }
@@ -641,7 +671,7 @@ int ompi_mtl_ofi_hosted_sc_try_irecv(struct ompi_communicator_t *comm, int src,
     ofi_req->length = length;
     ofi_req->comm = comm;
 
-    opal_mutex_lock(&slot->lock);
+    sc_lock(slot);
 
     OPAL_LIST_FOREACH_SAFE (ue, ue_next, &slot->unexpected,
                             ompi_mtl_ofi_hosted_sc_ue_t) {
@@ -656,7 +686,7 @@ int ompi_mtl_ofi_hosted_sc_try_irecv(struct ompi_communicator_t *comm, int src,
         if (ue->is_sync) {
             sw = sc_release_ssend(ue);
         }
-        opal_mutex_unlock(&slot->lock);
+        sc_unlock(slot);
 
         sc_finish_recv(ofi_req, start, ue->src_rank, ue->tag, ue->buf, ue->len);
         if (NULL != sw) {
@@ -668,13 +698,13 @@ int ompi_mtl_ofi_hosted_sc_try_irecv(struct ompi_communicator_t *comm, int src,
 
     if (any_src_ofi_only) {
         /* No local UE — wait on OFI only; do not leave an SC posted entry. */
-        opal_mutex_unlock(&slot->lock);
+        sc_unlock(slot);
         return 0;
     }
 
     pr = sc_pr_get(slot);
     if (NULL == pr) {
-        opal_mutex_unlock(&slot->lock);
+        sc_unlock(slot);
         return 0;
     }
     pr->req = ofi_req;
@@ -687,7 +717,7 @@ int ompi_mtl_ofi_hosted_sc_try_irecv(struct ompi_communicator_t *comm, int src,
     pr->waiter = NULL;
     sc_trace(4, (int) opal_proc_local_get()->proc_name.vpid, src, tag, cid, ofi_req);
     opal_list_append(&slot->posted, &pr->super);
-    opal_mutex_unlock(&slot->lock);
+    sc_unlock(slot);
 
     return 1;
 }
@@ -706,7 +736,7 @@ void ompi_mtl_ofi_hosted_sc_mark_ofi_posted(ompi_mtl_ofi_request_t *ofi_req)
         return;
     }
 
-    opal_mutex_lock(&slot->lock);
+    sc_lock(slot);
     if (ofi_req->req_started) {
         /* Matched via SC before/during fi_trecv — remove posted entry. */
         OPAL_LIST_FOREACH_SAFE (pr, pr_next, &slot->posted,
@@ -717,7 +747,7 @@ void ompi_mtl_ofi_hosted_sc_mark_ofi_posted(ompi_mtl_ofi_request_t *ofi_req)
                 break;
             }
         }
-        opal_mutex_unlock(&slot->lock);
+        sc_unlock(slot);
         return;
     }
     OPAL_LIST_FOREACH_SAFE (pr, pr_next, &slot->posted,
@@ -727,7 +757,7 @@ void ompi_mtl_ofi_hosted_sc_mark_ofi_posted(ompi_mtl_ofi_request_t *ofi_req)
             break;
         }
     }
-    opal_mutex_unlock(&slot->lock);
+    sc_unlock(slot);
 }
 
 void ompi_mtl_ofi_hosted_sc_ofi_recv_claimed(ompi_mtl_ofi_request_t *ofi_req)
@@ -743,7 +773,7 @@ void ompi_mtl_ofi_hosted_sc_ofi_recv_claimed(ompi_mtl_ofi_request_t *ofi_req)
         return;
     }
 
-    opal_mutex_lock(&slot->lock);
+    sc_lock(slot);
     OPAL_LIST_FOREACH_SAFE (pr, pr_next, &slot->posted,
                             ompi_mtl_ofi_hosted_sc_posted_t) {
         if (pr->req == ofi_req) {
@@ -752,7 +782,7 @@ void ompi_mtl_ofi_hosted_sc_ofi_recv_claimed(ompi_mtl_ofi_request_t *ofi_req)
             break;
         }
     }
-    opal_mutex_unlock(&slot->lock);
+    sc_unlock(slot);
 }
 
 int ompi_mtl_ofi_hosted_sc_cancel_recv(ompi_mtl_ofi_request_t *ofi_req)
@@ -770,7 +800,7 @@ int ompi_mtl_ofi_hosted_sc_cancel_recv(ompi_mtl_ofi_request_t *ofi_req)
         return 0;
     }
 
-    opal_mutex_lock(&slot->lock);
+    sc_lock(slot);
     OPAL_LIST_FOREACH_SAFE (pr, pr_next, &slot->posted,
                             ompi_mtl_ofi_hosted_sc_posted_t) {
         if (pr->req == ofi_req) {
@@ -783,7 +813,7 @@ int ompi_mtl_ofi_hosted_sc_cancel_recv(ompi_mtl_ofi_request_t *ofi_req)
             break;
         }
     }
-    opal_mutex_unlock(&slot->lock);
+    sc_unlock(slot);
 
     if (found) {
         ofi_req->super.ompi_req->req_status._cancelled = true;
@@ -820,7 +850,7 @@ int ompi_mtl_ofi_hosted_sc_try_park_pending(void)
         return 1;
     }
 
-    opal_mutex_lock(&slot->lock);
+    sc_lock(slot);
     OPAL_LIST_FOREACH (pr, &slot->posted, ompi_mtl_ofi_hosted_sc_posted_t) {
         if (!pr->req->req_started) {
             pending = 1;
@@ -830,7 +860,7 @@ int ompi_mtl_ofi_hosted_sc_try_park_pending(void)
             }
         }
     }
-    opal_mutex_unlock(&slot->lock);
+    sc_unlock(slot);
 
     /*
      * Multi-OS: only suppress CQ park for *pure* same-OS SC waits.
