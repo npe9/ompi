@@ -1163,6 +1163,36 @@ static int sc_coll_leader_finish_local_reduce(void *vctx)
     return MPI_SUCCESS;
 }
 
+/* LITHE_HOSTED_SC_COLL_REORDER=1 (2026-10-21, default off for A/B): on leaving a single-OS
+ * flat collective, yield once if other contexts are runnable, so the scheduler (LPT, B27)
+ * chooses who runs next. Without it the ranks spinning in the collective at release just
+ * continue on their harts: ranks K=8 (8 ranks / 4 harts, odd ranks 2x work) had ~4 ranks
+ * continue in place each iteration, only ~2 of them heavy, the last heavy starting 3.2-3.4 ms
+ * after release -- the whole 0.7 ms/iter gap to the 3W bound (GAPS C17.11). */
+static int sc_coll_reorder = -1;
+static inline void sc_coll_reorder_point(void)
+{
+#if HAVE_LITHE
+    if (sc_coll_reorder < 0) {
+        const char *e = getenv("LITHE_HOSTED_SC_COLL_REORDER");
+        sc_coll_reorder = e ? atoi(e) : 0;
+    }
+    if (sc_coll_reorder >= 2) {
+        /* =2: let the last arrival's futex_wake_all enqueue the sleepers first. */
+        for (int k = 0; k < 400; ++k) {
+            cpu_relax();
+        }
+    }
+    if (sc_coll_reorder && lithe_fork_join_current_runnable_count() > 0 && lithe_can_block()) {
+        if (sc_coll_reorder >= 3) {
+            lithe_fork_join_context_yield_ranked(); /* =3: keep this rank's LPT burst */
+        } else {
+            lithe_context_yield();
+        }
+    }
+#endif
+}
+
 int ompi_lithe_hosted_sc_coll_barrier(MPI_Comm comm)
 {
     sc_coll_layout_t L;
@@ -1176,6 +1206,7 @@ int ompi_lithe_hosted_sc_coll_barrier(MPI_Comm comm)
     }
     if (L.single_os) {
         sc_coll_ticket_barrier(L.size, 0);
+        sc_coll_reorder_point();
         return MPI_SUCCESS;
     }
     /* Multi-OS hybrid: local arrive → leader cross-OS sync → local release. */
@@ -1259,6 +1290,7 @@ int ompi_lithe_hosted_sc_coll_allreduce(const void *sendbuf, void *recvbuf,
             sc_coll_ticket_barrier(L.size, 0);
         }
         (void) epoch;
+        sc_coll_reorder_point();
         return MPI_SUCCESS;
     }
 
@@ -1450,6 +1482,9 @@ int ompi_lithe_hosted_sc_coll_allreduce(const void *sendbuf, void *recvbuf,
     }
     if (!dblbuf) {
         sc_coll_ticket_barrier((int) L.rph, prog);
+    }
+    if (L.single_os) {
+        sc_coll_reorder_point();
     }
     return MPI_SUCCESS;
 }
