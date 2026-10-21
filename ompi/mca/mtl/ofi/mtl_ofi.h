@@ -835,6 +835,9 @@ ompi_mtl_ofi_progress(void)
          * may fi_cq_read / CQ-park. Non-owners return 0 immediately (no
          * context_lock thrash); wait_sync idle uses progress_block which
          * waits for a turn. */
+        if (OPAL_UNLIKELY(0 != ompi_mtl_ofi_sc_npull_total)) {
+            count += ompi_mtl_ofi_hosted_sc_pull_progress(); /* LITHE_SC_PULL */
+        }
         if (OPAL_UNLIKELY(ompi_mtl_ofi_sc_cq_every > 1)) {
             /* per context: __thread is per Lithe context here */
             static __thread unsigned sc_cq_calls;

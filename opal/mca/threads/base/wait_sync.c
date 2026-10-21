@@ -81,6 +81,12 @@ static opal_atomic_int32_t num_thread_in_progress = 0;
  * global error wakeup reaches them only through the timeout's recheck. */
 int opal_lithe_wait_sync_direct = -1;
 int (*opal_lithe_wait_sync_keep_progress)(void) = NULL;
+/* Set by mtl/ofi's hosted SC path (LITHE_SC_PULL): told 1 while the calling context
+ * spins in a direct wait on its hart and 0 before it yields, sleeps or returns, so
+ * senders can leave large copies to it (GAPS C17.7). */
+void (*opal_lithe_wait_sync_spinning)(int on) = NULL;
+#define LITHE_WSD_SPINNING(on) \
+    do { if (NULL != opal_lithe_wait_sync_spinning) opal_lithe_wait_sync_spinning(on); } while (0)
 static unsigned lithe_wsd_spin = 256, lithe_wsd_progress = 32, lithe_wsd_timeout_us = 100;
 /* LITHE_WAIT_SYNC_DIRECT_IDLE_SPIN (default 1; 0 = always sleep after the spin
  * budget). Within the budget a waiter yields to runnable peers as before; when the
@@ -131,13 +137,16 @@ static void lithe_sync_wait_direct_sleep(ompi_wait_sync_t *sync)
          * internal receives do not wake this sync: sleeping cost a 100 us timeout
          * per round (Iallreduce 300-450 us/op, Ibarrier 8 ranks / 3 harts hung). */
         if (lithe_fork_join_current_runnable_count() > 0) {
+            LITHE_WSD_SPINNING(0);
             lithe_context_yield();
+            LITHE_WSD_SPINNING(1);
         } else {
             cpu_relax();
         }
         return;
     }
     if (c > 0 && lithe_can_block()) {
+        LITHE_WSD_SPINNING(0);
         if (0 == lithe_wsd_timeout_us) {
             /* Untimed: the timer arm + cancel per sleep was ~8 % of a hosted halo
              * loop (parlib_timer_cancel). Safe for what we know needs opal_progress
@@ -148,6 +157,7 @@ static void lithe_sync_wait_direct_sleep(ompi_wait_sync_t *sync)
             struct timespec rel = {0, (long) lithe_wsd_timeout_us * 1000L};
             (void) futex_wait_timeout((int *) &sync->count, (int) c, &rel);
         }
+        LITHE_WSD_SPINNING(1);
     }
 }
 
@@ -155,6 +165,7 @@ static int lithe_sync_wait_direct(ompi_wait_sync_t *sync)
 {
     unsigned i = 0;
     int yields = 0;
+    LITHE_WSD_SPINNING(1);
     while (sync->count > 0) {
         if (0 == (i % lithe_wsd_progress)) {
             (void) opal_progress();
@@ -165,7 +176,9 @@ static int lithe_sync_wait_direct(ompi_wait_sync_t *sync)
                 if (lithe_wsd_yields > 0 && ++yields > lithe_wsd_yields) {
                     lithe_sync_wait_direct_sleep(sync);
                 } else {
+                    LITHE_WSD_SPINNING(0);
                     lithe_context_yield();
+                    LITHE_WSD_SPINNING(1);
                 }
             }
         }
@@ -180,6 +193,7 @@ static int lithe_sync_wait_direct(ompi_wait_sync_t *sync)
         }
         lithe_sync_wait_direct_sleep(sync);
     }
+    LITHE_WSD_SPINNING(0);
     return (0 == sync->status) ? OPAL_SUCCESS : OPAL_ERROR;
 }
 #endif

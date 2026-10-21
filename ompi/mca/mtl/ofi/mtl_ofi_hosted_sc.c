@@ -56,6 +56,11 @@ typedef struct {
     int cid;
     int is_sync;
     int send_is_isend;
+    /* LITHE_SC_RNDV: buf is the sender's own buffer (not owned, never freed). */
+    int borrowed;
+    /* LITHE_SC_PULL: the matched receive the receiver copies into (on slot->pulls). */
+    ompi_mtl_ofi_request_t *rreq;
+    void *rdst;
     ompi_mtl_ofi_request_t *send_req;
     /* Sync-send Lithe context parked until matching recv takes this UE. */
     lithe_context_t *send_waiter;
@@ -75,23 +80,31 @@ typedef struct {
     opal_lifo_t pr_free;
     opal_lifo_t ue_free;
     opal_atomic_lock_t spin; /* LITHE_SC_SPINLOCK: used instead of `lock` */
+    /* LITHE_SC_PULL: matched large messages the receiver copies itself, and whether
+     * the receiver is spinning in a direct wait on a hart right now. */
+    opal_list_t pulls;
+    opal_atomic_int32_t npull;
+    volatile int32_t spinning;
 } ompi_mtl_ofi_hosted_sc_slot_t;
 
-/* LITHE_SC_SPINLOCK=1 (2026-10-21, default 0 for A/B): guard the slot queues with a
- * plain spinlock instead of opal_mutex (a Lithe MCS spin-then-block mutex, ~15 %
- * of a hosted 4 KiB halo loop in lock/unlock). Every critical section is short
- * and never yields; the sync-send park releases the lock from the block callback,
- * which a spinlock allows too. NEGATIVE (4 reps; K=8 8 reps): halo 4 KiB 4.75-4.85
- * -> 4.74-4.79 us, allreduce and 8-context halo unchanged, MPI+OpenMP 16^3 worse in
- * 2/4 reps (0.0088 vs 0.0073-0.0076 s), ranks K=8 mean 8.93 -> 8.70 (overlapping).
- * The lock cost in the profile is contention, which a spinlock does not remove. */
-static int sc_spin = 0;
+/* LITHE_SC_SPINLOCK (2026-10-21, default ON, =0 restores the opal_mutex, a Lithe MCS
+ * spin-then-block mutex): guard the slot queues with a plain spinlock. Every
+ * critical section is short and never yields; the sync-send park releases the lock
+ * from the block callback, which a spinlock allows too. A/B with real locks (4 reps,
+ * 3 harts unless noted): halo 4 KiB 5.2-5.6 -> 4.9-5.0 us, 4 harts 3.6-4.0 -> 2.24-2.26,
+ * 8 contexts 7.0-7.5 -> 6.3-6.8; allreduce, miniFE 32^3, MPI+OpenMP 16^3 unchanged;
+ * ranks K=8 8.81 vs 8.75 ms/iter (8 reps, overlapping). */
+static int sc_spin = 1;
+/* 82930e332d's global replace made these wrappers call themselves; gcc deleted the
+ * infinite recursion, so the slot queues ran UNLOCKED by default until 2026-10-21
+ * afternoon. The first spinlock A/B's "mutex" arm was really "no lock" (it found no gain); it and
+ * every hosted SC timing taken with that build are void. */
 static inline void sc_lock(ompi_mtl_ofi_hosted_sc_slot_t *slot)
 {
     if (sc_spin) {
         opal_atomic_lock(&slot->spin);
     } else {
-        sc_lock(slot);
+        opal_mutex_lock(&slot->lock);
     }
 }
 static inline void sc_unlock(ompi_mtl_ofi_hosted_sc_slot_t *slot)
@@ -99,7 +112,7 @@ static inline void sc_unlock(ompi_mtl_ofi_hosted_sc_slot_t *slot)
     if (sc_spin) {
         opal_atomic_unlock(&slot->spin);
     } else {
-        sc_unlock(slot);
+        opal_mutex_unlock(&slot->lock);
     }
 }
 
@@ -144,6 +157,35 @@ static int sc_enabled = 0;
 #define SC_UE_INLINE 4096
 static int sc_freelist = 0;
 
+/* LITHE_SC_RNDV=N (2026-10-21, default 4096 = ob1/sm's eager limit, 0 = off): an
+ * unexpected message longer than N bytes is not
+ * copied into a UE buffer; the UE borrows the sender's buffer and the send
+ * completes only when a receive matches it (the existing synchronous-send
+ * machinery), so a large unexpected message costs one copy instead of a malloc
+ * and two. Vanilla ob1/sm does the same above its 4 KiB eager limit. MPI_Send
+ * of a large message then blocks until matched, which the standard allows and
+ * ob1 also does. Self-sends stay eager (a blocking large send to self before the
+ * receive would deadlock). A/B (4 reps): 1 MiB reduce 285-302 -> 257-271 us, halo
+ * 64 KiB at 4 harts 25.7-28.0 -> 18.0; the rest unchanged, ranks K=8 unchanged. */
+static size_t sc_rndv = 4096;
+
+/* LITHE_SC_PULL (2026-10-21, default ON, =0 restores sender copies): when a message longer than
+ * sc_rndv matches a posted receive whose owner is spinning in a direct wait, the
+ * sender queues it on the receiver's slot (borrowing its own buffer, completing as a
+ * sync send) and the receiver copies it from its progress. Without this, whichever
+ * rank arrived second did every copy: a 2-rank 64 KiB halo alternated exactly
+ * between iterations with all four copies on one rank and none on the other
+ * (posts >3 us in 2505/5000 iterations, <1 us in the rest), so four copies sat
+ * serially on the critical path. Vanilla ob1/sm always copies on the receiver
+ * (xpmem get). Lost-wakeup rule: the receiver clears `spinning`, fences, then drains
+ * npull; the sender bumps npull, fences, then reads `spinning` and, if clear,
+ * takes its entry back and copies itself. A/B: halo 64 KiB 2 ranks / 2 harts
+ * 14.9 -> 4.7 us, 4 / 4 17.8 -> 16.6 (vanilla ob1/sm 12.9-16.9 in the same run); the
+ * A/B suite (allreduce, halo 4 KiB, 1 MiB reduce, miniFE, MPI+OpenMP, ranks K=8)
+ * unchanged. 0/1600 failures with every byte verified (2/2, 4/4, 8/3, 8/2). */
+static int sc_pull = 1;
+opal_atomic_int32_t ompi_mtl_ofi_sc_npull_total = 0;
+
 static ompi_mtl_ofi_hosted_sc_posted_t *sc_pr_get(ompi_mtl_ofi_hosted_sc_slot_t *slot)
 {
     if (sc_freelist) {
@@ -184,7 +226,7 @@ static ompi_mtl_ofi_hosted_sc_ue_t *sc_ue_get(ompi_mtl_ofi_hosted_sc_slot_t *slo
 
 static void sc_ue_put(ompi_mtl_ofi_hosted_sc_slot_t *slot, ompi_mtl_ofi_hosted_sc_ue_t *ue)
 {
-    if (ue->buf != ue->inl) {
+    if (!ue->borrowed && ue->buf != ue->inl) {
         free(ue->buf);
     }
     ue->buf = NULL;
@@ -345,6 +387,66 @@ static lithe_context_t *sc_release_ssend(ompi_mtl_ofi_hosted_sc_ue_t *ue)
     return w;
 }
 
+/* LITHE_SC_PULL: copy every queued large message into its matched receive. Runs in
+ * the receiving context (own slot only), from MTL progress and when it stops
+ * spinning. */
+int ompi_mtl_ofi_hosted_sc_pull_progress(void)
+{
+    ompi_mtl_ofi_hosted_sc_slot_t *slot;
+    ompi_mtl_ofi_hosted_sc_ue_t *ue;
+    opal_list_t mine;
+    int n = 0;
+
+    slot = sc_slot_for_vpid(opal_proc_local_get()->proc_name.vpid);
+    if (NULL == slot || 0 == slot->npull) {
+        return 0;
+    }
+    OBJ_CONSTRUCT(&mine, opal_list_t);
+    sc_lock(slot);
+    while (NULL != (ue = (ompi_mtl_ofi_hosted_sc_ue_t *) opal_list_remove_first(&slot->pulls))) {
+        opal_list_append(&mine, &ue->super);
+        ++n;
+    }
+    if (n > 0) {
+        opal_atomic_add_fetch_32(&slot->npull, -n);
+        opal_atomic_add_fetch_32(&ompi_mtl_ofi_sc_npull_total, -n);
+    }
+    sc_unlock(slot);
+    while (NULL != (ue = (ompi_mtl_ofi_hosted_sc_ue_t *) opal_list_remove_first(&mine))) {
+        lithe_context_t *sw;
+        sc_finish_recv(ue->rreq, ue->rdst, ue->src_rank, ue->tag, ue->buf, ue->len);
+        /* The sender's buffer is free only after the copy above. */
+        sc_lock(slot);
+        sw = sc_release_ssend(ue);
+        sc_unlock(slot);
+        if (NULL != sw) {
+            lithe_context_unblock(sw);
+        }
+        sc_ue_put(slot, ue);
+    }
+    OBJ_DESTRUCT(&mine);
+    return n;
+}
+
+/* opal_lithe_wait_sync_spinning hook (base/wait_sync.c). */
+static void sc_wait_spinning(int on)
+{
+    ompi_mtl_ofi_hosted_sc_slot_t *slot = sc_slot_for_vpid(opal_proc_local_get()->proc_name.vpid);
+
+    if (NULL == slot) {
+        return;
+    }
+    if (on) {
+        slot->spinning = 1;
+        return;
+    }
+    slot->spinning = 0;
+    opal_atomic_mb(); /* pairs with the sender's fence after npull++ */
+    if (0 != slot->npull) {
+        (void) ompi_mtl_ofi_hosted_sc_pull_progress();
+    }
+}
+
 int ompi_mtl_ofi_hosted_sc_enabled(void)
 {
     unsigned long rph;
@@ -408,14 +510,21 @@ int ompi_mtl_ofi_hosted_sc_init(void)
         OBJ_CONSTRUCT(&sc_slots[i].lock, opal_mutex_t);
         OBJ_CONSTRUCT(&sc_slots[i].posted, opal_list_t);
         OBJ_CONSTRUCT(&sc_slots[i].unexpected, opal_list_t);
+        OBJ_CONSTRUCT(&sc_slots[i].pulls, opal_list_t);
+        sc_slots[i].npull = 0;
+        sc_slots[i].spinning = 0;
         OBJ_CONSTRUCT(&sc_slots[i].pr_free, opal_lifo_t);
         OBJ_CONSTRUCT(&sc_slots[i].ue_free, opal_lifo_t);
         opal_atomic_lock_init(&sc_slots[i].spin, OPAL_ATOMIC_LOCK_UNLOCKED);
     }
     e = getenv("LITHE_SC_SPINLOCK");
-    sc_spin = (NULL != e && '1' == e[0]);
+    sc_spin = (NULL != e && '0' == e[0]) ? 0 : 1;
     e = getenv("LITHE_SC_FREELIST");
     sc_freelist = (NULL != e && '0' == e[0]) ? 0 : 1;
+    e = getenv("LITHE_SC_RNDV");
+    sc_rndv = (NULL != e) ? (size_t) strtoul(e, NULL, 10) : 4096;
+    e = getenv("LITHE_SC_PULL");
+    sc_pull = !(NULL != e && '0' == e[0]) && sc_rndv > 0 && !sc_multi_os_world();
     sc_enabled = 1;
     if (!sc_multi_os_world()) {
         /* Single-OS world: every peer goes through the memcpy short-circuit, so
@@ -443,6 +552,9 @@ int ompi_mtl_ofi_hosted_sc_init(void)
     }
     /* wait_sync scarce path: park on posted recv instead of yield→steal. */
     opal_progress_set_sc_park_callback(ompi_mtl_ofi_hosted_sc_try_park_pending);
+    if (sc_pull) {
+        opal_lithe_wait_sync_spinning = sc_wait_spinning;
+    }
     opal_output_verbose(1, opal_common_ofi.output,
                         "mtl:ofi: hosted same-OS short-circuit enabled (slots=%lu multi_os=%d)",
                         rph, sc_multi_os_world());
@@ -454,6 +566,7 @@ void ompi_mtl_ofi_hosted_sc_finalize(void)
     unsigned long i;
 
     opal_progress_set_sc_park_callback(NULL);
+    opal_lithe_wait_sync_spinning = NULL;
     if (NULL == sc_slots) {
         sc_enabled = 0;
         return;
@@ -464,7 +577,7 @@ void ompi_mtl_ofi_hosted_sc_finalize(void)
         while (NULL
                != (ue = (ompi_mtl_ofi_hosted_sc_ue_t *) opal_list_remove_first(
                        &sc_slots[i].unexpected))) {
-            if (ue->buf != ue->inl) {
+            if (!ue->borrowed && ue->buf != ue->inl) {
                 free(ue->buf);
             }
             OBJ_RELEASE(ue);
@@ -482,6 +595,7 @@ void ompi_mtl_ofi_hosted_sc_finalize(void)
         }
         OBJ_DESTRUCT(&sc_slots[i].ue_free);
         OBJ_DESTRUCT(&sc_slots[i].pr_free);
+        OBJ_DESTRUCT(&sc_slots[i].pulls);
         OBJ_DESTRUCT(&sc_slots[i].unexpected);
         OBJ_DESTRUCT(&sc_slots[i].posted);
         OBJ_DESTRUCT(&sc_slots[i].lock);
@@ -555,6 +669,74 @@ int ompi_mtl_ofi_hosted_sc_try_send(struct ompi_communicator_t *comm, int dest,
         break;
     }
 
+    if (NULL != matched_recv && sc_pull && length > sc_rndv && dest != src_rank
+        && !need_ofi_cancel && slot->spinning
+        && NULL != (ue = sc_ue_get(slot))) {
+        /* LITHE_SC_PULL: leave the copy to the spinning receiver (see sc_pull). */
+        int reclaimed = 0;
+
+        matched_recv->req_started = true; /* matched: no SC cancel from here on */
+        ue->buf = start;
+        ue->len = length;
+        ue->tag = tag;
+        ue->src_rank = src_rank;
+        ue->cid = cid;
+        ue->is_sync = 1;
+        ue->borrowed = 1;
+        ue->send_is_isend = is_isend ? 1 : 0;
+        ue->send_req = ofi_req;
+        ue->send_waiter = NULL;
+        ue->rreq = matched_recv;
+        ue->rdst = matched_dst;
+        ofi_req->completion_count = 1;
+        ofi_req->status.MPI_ERROR = OMPI_SUCCESS;
+        opal_list_append(&slot->pulls, &ue->super);
+        opal_atomic_add_fetch_32(&slot->npull, 1);
+        opal_atomic_add_fetch_32(&ompi_mtl_ofi_sc_npull_total, 1);
+        sc_unlock(slot);
+        opal_atomic_mb(); /* pairs with sc_wait_spinning(0)'s fence */
+        if (!slot->spinning) {
+            ompi_mtl_ofi_hosted_sc_ue_t *it;
+            sc_lock(slot);
+            OPAL_LIST_FOREACH (it, &slot->pulls, ompi_mtl_ofi_hosted_sc_ue_t) {
+                if (it == ue) {
+                    opal_list_remove_item(&slot->pulls, &ue->super);
+                    opal_atomic_add_fetch_32(&slot->npull, -1);
+                    opal_atomic_add_fetch_32(&ompi_mtl_ofi_sc_npull_total, -1);
+                    reclaimed = 1;
+                    break;
+                }
+            }
+            sc_unlock(slot);
+        }
+        if (reclaimed) {
+            /* The receiver stopped spinning before taking it: copy here as before. */
+            sc_ue_put(slot, ue);
+            ofi_req->completion_count = is_isend ? 1 : 0;
+            sc_finish_recv(matched_recv, matched_dst, src_rank, tag, start, length);
+            sc_finish_send(ofi_req, is_isend, free_after, start);
+        } else if (!is_isend) {
+            sc_ssend_park_arg_t parg;
+
+            sc_lock(slot);
+            while (ofi_req->completion_count > 0) {
+                parg.slot = slot;
+                parg.ue = ue;
+                parg.sreq = ofi_req;
+                lithe_context_block(sc_ssend_park_cb, &parg);
+                sc_lock(slot);
+            }
+            sc_unlock(slot);
+            if (free_after && NULL != start) {
+                free(start);
+            }
+        }
+        if (NULL != recv_waiter) {
+            lithe_context_unblock(recv_waiter);
+        }
+        return 1;
+    }
+
     if (NULL != matched_recv) {
         sc_unlock(slot);
         /* Cancel OFI before completion_callback (may free the request). */
@@ -580,7 +762,13 @@ int ompi_mtl_ofi_hosted_sc_try_send(struct ompi_communicator_t *comm, int dest,
         return 1;
     }
     payload = NULL;
-    if (length > 0) {
+    ue->borrowed = 0;
+    if (sc_rndv > 0 && length > sc_rndv && dest != src_rank) {
+        /* Rendezvous: borrow the sender's buffer; complete as a sync send. */
+        ue->borrowed = 1;
+        payload = start;
+        is_sync = 1;
+    } else if (length > 0) {
         payload = (sc_freelist && length <= SC_UE_INLINE) ? (void *) ue->inl : malloc(length);
         if (NULL == payload) {
             ue->buf = NULL;
@@ -683,12 +871,18 @@ int ompi_mtl_ofi_hosted_sc_try_irecv(struct ompi_communicator_t *comm, int src,
         }
         opal_list_remove_item(&slot->unexpected, &ue->super);
         sc_trace(3, (int) opal_proc_local_get()->proc_name.vpid, ue->src_rank, ue->tag, cid, ofi_req);
-        if (ue->is_sync) {
+        if (ue->is_sync && !ue->borrowed) {
             sw = sc_release_ssend(ue);
         }
         sc_unlock(slot);
 
         sc_finish_recv(ofi_req, start, ue->src_rank, ue->tag, ue->buf, ue->len);
+        if (ue->borrowed) {
+            /* The sender's buffer is free only after the copy above. */
+            sc_lock(slot);
+            sw = sc_release_ssend(ue);
+            sc_unlock(slot);
+        }
         if (NULL != sw) {
             lithe_context_unblock(sw);
         }

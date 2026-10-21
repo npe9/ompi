@@ -30,6 +30,11 @@ BEGIN_C_DECLS
 /* Progress calls per OFI CQ poll in a single-OS SC world (LITHE_MTL_OFI_SC_CQ_EVERY). */
 extern int ompi_mtl_ofi_sc_cq_every;
 
+/* LITHE_SC_PULL: queued large messages across all slots, and the receiver-side
+ * drain (own slot) that MTL progress calls while the count is nonzero. */
+extern opal_atomic_int32_t ompi_mtl_ofi_sc_npull_total;
+int ompi_mtl_ofi_hosted_sc_pull_progress(void);
+
 int ompi_mtl_ofi_hosted_sc_init(void);
 void ompi_mtl_ofi_hosted_sc_finalize(void);
 

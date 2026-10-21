@@ -149,6 +149,9 @@ OPAL_DECLSPEC int opal_lithe_wait_sync_direct_resolve(void);
  * nonzero while the CALLING Lithe context owns such a request, so its waits keep
  * polling instead of sleeping (GAPS B33). */
 OPAL_DECLSPEC extern int (*opal_lithe_wait_sync_keep_progress)(void);
+/* Set by mtl/ofi's hosted SC path: 1 while the calling context spins in a direct
+ * wait, 0 before it yields, sleeps or returns (base/wait_sync.c). */
+OPAL_DECLSPEC extern void (*opal_lithe_wait_sync_spinning)(int on);
 OPAL_DECLSPEC extern int opal_lithe_wait_sync_direct;
 static inline int opal_lithe_wait_sync_direct_on(void)
 {
