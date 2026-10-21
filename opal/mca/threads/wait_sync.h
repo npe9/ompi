@@ -152,6 +152,8 @@ OPAL_DECLSPEC extern int (*opal_lithe_wait_sync_keep_progress)(void);
 /* Set by mtl/ofi's hosted SC path: 1 while the calling context spins in a direct
  * wait, 0 before it yields, sleeps or returns (base/wait_sync.c). */
 OPAL_DECLSPEC extern void (*opal_lithe_wait_sync_spinning)(int on);
+/* Waiters (direct wait_sync, flat barrier) currently queued after a yield. */
+OPAL_DECLSPEC extern opal_atomic_int32_t opal_lithe_wait_queued;
 OPAL_DECLSPEC extern int opal_lithe_wait_sync_direct;
 static inline int opal_lithe_wait_sync_direct_on(void)
 {

@@ -98,12 +98,24 @@ static unsigned lithe_wsd_spin = 256, lithe_wsd_progress = 32, lithe_wsd_timeout
  * 8.7-9.0 -> 9.5-9.8 ms/iter, ~10x the context wakeups, 15-30 us p50 / 250-350
  * us p90 unblock->dispatch, harts idle 43-154 -> 166-200 ms (Perfetto). */
 static int lithe_wsd_idle_spin = 1;
-/* LITHE_WAIT_SYNC_DIRECT_YIELDS (default 1, 0 = unlimited): after this many yields
- * to runnable peers in one wait, sleep instead. The trade-off (4 reps, with the
- * barrier budget below set the same): yields 8 -> halo 4 KiB 3.6 us but ranks K=8
- * 9.3-9.6 ms/iter; 2 -> 6.8 us / 8.9-9.4; 1 -> 7.7 us / 8.5-9.1 (old path 11.2 us /
- * 8.7-9.1). 1 is the setting that loses nowhere. */
-static int lithe_wsd_yields = 1;
+/* LITHE_WAIT_SYNC_DIRECT_YIELDS (default 8 since 2026-10-21 afternoon, was 1; 0 =
+ * unlimited): after this many yields to runnable peers in one wait, sleep instead.
+ * Morning A/B (with the barrier budget set the same): 8 cost ranks K=8 (9.3-9.6 vs
+ * 8.5-9.1 ms/iter). After C17.6-8 removed the shared-state contention, ablating the
+ * knobs one at a time showed that cost was the flat-barrier budget, not this one:
+ * yields 8 alone gives halo 4 KiB 4 contexts / 3 harts 4.5-4.8 -> 2.4-2.8 us, 8 contexts
+ * 5.9 -> 5.2, ranks K=8 8.89 -> 8.79 and 8.93 -> 8.82 (two A/Bs, 6 and 4 reps), the
+ * rest of the suite unchanged. */
+static int lithe_wsd_yields = 8;
+/* LITHE_WAIT_SYNC_DIRECT_SMART=1 (2026-10-21, default off; NEGATIVE here: with the
+ * latency set, ranks K=8 9.84 vs 9.60 ms/iter without it, 6 reps): past the first
+ * yield, keep yielding (within the budget) only while every runnable context is
+ * itself a waiter; if one has real work, sleep instead of coming back for a hart.
+ * GAPS C17.9: the latency set's K=8 cost was waiters re-dispatched only to yield
+ * again, each taking a slot between a heavy rank's runs. opal_lithe_wait_queued counts
+ * waiters sitting in the run queue after a yield (a heuristic snapshot). */
+static int lithe_wsd_smart = 0;
+opal_atomic_int32_t opal_lithe_wait_queued = 0; /* also counted by the flat barrier */
 
 int opal_lithe_wait_sync_direct_resolve(void)
 {
@@ -125,6 +137,7 @@ int opal_lithe_wait_sync_direct_resolve(void)
     if ((e = getenv("LITHE_WAIT_SYNC_DIRECT_TIMEOUT_US")) && atoi(e) >= 0) lithe_wsd_timeout_us = (unsigned) atoi(e); /* 0 = untimed */
     if ((e = getenv("LITHE_WAIT_SYNC_DIRECT_IDLE_SPIN"))) lithe_wsd_idle_spin = ('0' != e[0]);
     if ((e = getenv("LITHE_WAIT_SYNC_DIRECT_YIELDS"))) lithe_wsd_yields = atoi(e);
+    if ((e = getenv("LITHE_WAIT_SYNC_DIRECT_SMART"))) lithe_wsd_smart = ('1' == e[0]);
     opal_lithe_wait_sync_direct = 1;
     return 1;
 }
@@ -172,12 +185,20 @@ static int lithe_sync_wait_direct(ompi_wait_sync_t *sync)
             if (sync->count <= 0) {
                 break;
             }
-            if (lithe_fork_join_current_runnable_count() > 0) {
-                if (lithe_wsd_yields > 0 && ++yields > lithe_wsd_yields) {
+            int runnable = lithe_fork_join_current_runnable_count();
+            if (runnable > 0) {
+                if ((lithe_wsd_yields > 0 && ++yields > lithe_wsd_yields) ||
+                    (lithe_wsd_smart && yields > 1 && runnable > opal_lithe_wait_queued)) {
                     lithe_sync_wait_direct_sleep(sync);
                 } else {
                     LITHE_WSD_SPINNING(0);
+                    if (lithe_wsd_smart) {
+                        opal_atomic_add_fetch_32(&opal_lithe_wait_queued, 1);
+                    }
                     lithe_context_yield();
+                    if (lithe_wsd_smart) {
+                        opal_atomic_add_fetch_32(&opal_lithe_wait_queued, -1);
+                    }
                     LITHE_WSD_SPINNING(1);
                 }
             }

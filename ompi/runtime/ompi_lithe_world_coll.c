@@ -887,6 +887,16 @@ static int sc_coll_ensure_arena(size_t nbytes)
  * harts; the RD Sendrecv path it replaces was 15.0).
  */
 static int sc_barrier_yields = -1;
+/* LITHE_HOSTED_SC_BARRIER_SMART=1 (2026-10-21, opt-in): past the first
+ * yield, sleep instead of yielding again when some runnable context is not itself a
+ * queued waiter (opal_lithe_wait_queued); yield on (within the budget) while only
+ * waiters are queued. Aim: the budget-4/8 allreduce latency without its ranks K=8
+ * cost (waiters re-dispatched between a heavy rank's runs, GAPS C17.9). With wait
+ * yields 8 and LITHE_HOSTED_SC_BARRIER_YIELDS=8: allreduce 4 contexts / 3 harts
+ * 4.6-4.8 -> 0.86-0.90 us, ranks K=8 +1-2 % (8.61 -> 8.71, 8.76 -> 8.94; 4 and 8 reps,
+ * overlapping), plain budget 4 +9 %. Opt-in: the default barrier budget (1) loses
+ * nowhere. */
+static int sc_barrier_smart = -1;
 
 static void sc_coll_ticket_barrier(int size, int with_progress)
 {
@@ -897,6 +907,8 @@ static void sc_coll_ticket_barrier(int size, int with_progress)
     if (sc_barrier_yields < 0) {
         const char *e = getenv("LITHE_HOSTED_SC_BARRIER_YIELDS");
         sc_barrier_yields = e ? atoi(e) : 1;
+        e = getenv("LITHE_HOSTED_SC_BARRIER_SMART");
+        sc_barrier_smart = (e && '1' == e[0]);
     }
 #endif
 
@@ -979,11 +991,20 @@ static void sc_coll_ticket_barrier(int size, int with_progress)
         } else if (lithe_fork_join_should_yield_to_runnable() ||
                    /* Spare-hart soft_cap: should_yield false but peer needs a hart. */
                    lithe_fork_join_current_runnable_count() > 0) {
-            if (sc_barrier_yields > 0 && ++yields > sc_barrier_yields && lithe_can_block()) {
+            int runnable = lithe_fork_join_current_runnable_count();
+            if (((sc_barrier_yields > 0 && ++yields > sc_barrier_yields) ||
+                 (sc_barrier_smart && yields > 1 && runnable > opal_lithe_wait_queued)) &&
+                lithe_can_block()) {
                 struct timespec rel = {0, 1000000L};
                 (void) futex_wait_timeout((int *) &sc_coll.arrived, (int) cur, &rel);
             } else {
+                if (sc_barrier_smart) {
+                    opal_atomic_add_fetch_32(&opal_lithe_wait_queued, 1);
+                }
                 lithe_context_yield();
+                if (sc_barrier_smart) {
+                    opal_atomic_add_fetch_32(&opal_lithe_wait_queued, -1);
+                }
             }
         } else {
             cpu_relax();
