@@ -28,6 +28,8 @@
 #include <lithe/fork_join_sched.h>
 #include <lithe/lithe.h>
 #include <parlib/arch.h> /* cpu_relax */
+#include <lithe/futex.h>
+#include "opal/util/proc.h"
 #endif
 
 static opal_mutex_t wait_sync_lock = OPAL_MUTEX_STATIC_INIT;
@@ -61,6 +63,107 @@ void opal_threads_base_wait_sync_global_wakeup_mt(int status)
 
 static opal_atomic_int32_t num_thread_in_progress = 0;
 
+#if HAVE_LITHE
+/* LITHE_WAIT_SYNC_DIRECT (2026-10-21, default ON in single-OS hosted worlds; =0
+ * restores the condvar/elected-progress wait). Every same-process receive completes inside the matching sender's call
+ * (mtl_ofi_hosted_sc.c), so a waiter needs no elected progress thread. The
+ * default path parks every waiter but one on a condvar, and each completion then
+ * takes the sync mutex, signals, and unblocks a context through the scheduler;
+ * perf of the 4 KiB halo stress: ~3000 samples in that mutex/condvar, ~2300 in the
+ * hart request behind the unblock, ~1000 polling the (idle) OFI CQs, against ~300
+ * in the copy itself. Direct mode: spin on the count, calling opal_progress every
+ * LITHE_WAIT_SYNC_DIRECT_PROGRESS spins (default 32) and yielding while another
+ * context is runnable; after LITHE_WAIT_SYNC_DIRECT_SPIN spins (default 1024) sleep
+ * in the Lithe futex on the count for at most LITHE_WAIT_SYNC_DIRECT_TIMEOUT_US
+ * (default 100). The timeout keeps opal_progress running for anything only it
+ * advances (libnbc schedules, generalized requests). The completer wakes the
+ * futex (WAIT_SYNC_SIGNAL). Direct waiters are not on the wait-sync list, so a
+ * global error wakeup reaches them only through the timeout's recheck. */
+int opal_lithe_wait_sync_direct = -1;
+static unsigned lithe_wsd_spin = 256, lithe_wsd_progress = 32, lithe_wsd_timeout_us = 100;
+/* LITHE_WAIT_SYNC_DIRECT_IDLE_SPIN (default 1; 0 = always sleep after the spin
+ * budget). Within the budget a waiter yields to runnable peers as before; when the
+ * budget runs out it sleeps only if a peer is runnable or the scheduler wants the
+ * hart back, and otherwise keeps spinning: its hart has nothing else to run, and a
+ * sleeper whose hart parked pays a hart wake per completion. (Sleeping at once
+ * whenever a peer was runnable lost most of the latency gain: allreduce 3.0 ->
+ * 12.7 us with 4 contexts on 3 harts.) bench/alt ranks K=8 (8 contexts / 4 harts, imbalanced) with 0:
+ * 8.7-9.0 -> 9.5-9.8 ms/iter, ~10x the context wakeups, 15-30 us p50 / 250-350
+ * us p90 unblock->dispatch, harts idle 43-154 -> 166-200 ms (Perfetto). */
+static int lithe_wsd_idle_spin = 1;
+/* LITHE_WAIT_SYNC_DIRECT_YIELDS (default 1, 0 = unlimited): after this many yields
+ * to runnable peers in one wait, sleep instead. The trade-off (4 reps, with the
+ * barrier budget below set the same): yields 8 -> halo 4 KiB 3.6 us but ranks K=8
+ * 9.3-9.6 ms/iter; 2 -> 6.8 us / 8.9-9.4; 1 -> 7.7 us / 8.5-9.1 (old path 11.2 us /
+ * 8.7-9.1). 1 is the setting that loses nowhere. */
+static int lithe_wsd_yields = 1;
+
+int opal_lithe_wait_sync_direct_resolve(void)
+{
+    const char *e = getenv("LITHE_WAIT_SYNC_DIRECT");
+    if ((NULL != e && '0' == e[0]) || !opal_lithe_env_cache_active()) {
+        opal_lithe_wait_sync_direct = 0;
+        return 0;
+    }
+    /* Not known before the RTE fills num_procs; no MPI request waits before that. */
+    if (0 == opal_process_info.num_procs) {
+        return 0;
+    }
+    if (opal_process_info.num_procs > opal_lithe_env_cache_rph()) {
+        opal_lithe_wait_sync_direct = 0; /* multi-OS: OFI completions need the CQ engine */
+        return 0;
+    }
+    if ((e = getenv("LITHE_WAIT_SYNC_DIRECT_SPIN"))) lithe_wsd_spin = (unsigned) atoi(e);
+    if ((e = getenv("LITHE_WAIT_SYNC_DIRECT_PROGRESS")) && atoi(e) > 0) lithe_wsd_progress = (unsigned) atoi(e);
+    if ((e = getenv("LITHE_WAIT_SYNC_DIRECT_TIMEOUT_US")) && atoi(e) > 0) lithe_wsd_timeout_us = (unsigned) atoi(e);
+    if ((e = getenv("LITHE_WAIT_SYNC_DIRECT_IDLE_SPIN"))) lithe_wsd_idle_spin = ('0' != e[0]);
+    if ((e = getenv("LITHE_WAIT_SYNC_DIRECT_YIELDS"))) lithe_wsd_yields = atoi(e);
+    opal_lithe_wait_sync_direct = 1;
+    return 1;
+}
+
+static void lithe_sync_wait_direct_sleep(ompi_wait_sync_t *sync)
+{
+    int32_t c = sync->count;
+    if (c > 0 && lithe_can_block()) {
+        struct timespec rel = {0, (long) lithe_wsd_timeout_us * 1000L};
+        (void) futex_wait_timeout((int *) &sync->count, (int) c, &rel);
+    }
+}
+
+static int lithe_sync_wait_direct(ompi_wait_sync_t *sync)
+{
+    unsigned i = 0;
+    int yields = 0;
+    while (sync->count > 0) {
+        if (0 == (i % lithe_wsd_progress)) {
+            (void) opal_progress();
+            if (sync->count <= 0) {
+                break;
+            }
+            if (lithe_fork_join_current_runnable_count() > 0) {
+                if (lithe_wsd_yields > 0 && ++yields > lithe_wsd_yields) {
+                    lithe_sync_wait_direct_sleep(sync);
+                } else {
+                    lithe_context_yield();
+                }
+            }
+        }
+        if (++i < lithe_wsd_spin) {
+            cpu_relax();
+            continue;
+        }
+        i = 0;
+        if (lithe_wsd_idle_spin && 0 == lithe_fork_join_current_runnable_count() &&
+            !lithe_fork_join_should_yield_to_runnable()) {
+            continue; /* nobody wants this hart: keep spinning, never park it */
+        }
+        lithe_sync_wait_direct_sleep(sync);
+    }
+    return (0 == sync->status) ? OPAL_SUCCESS : OPAL_ERROR;
+}
+#endif
+
 #define WAIT_SYNC_PASS_OWNERSHIP(who)                        \
     do {                                                     \
         opal_thread_internal_mutex_lock(&(who)->lock);       \
@@ -87,6 +190,13 @@ int ompi_sync_wait_mt(ompi_wait_sync_t *sync)
         return (0 == sync->status) ? OPAL_SUCCESS : OPAL_ERROR; }
     }
 
+#if HAVE_LITHE
+    if (opal_lithe_wait_sync_direct_on()) {
+        int rc = lithe_sync_wait_direct(sync);
+        if (_lt_on) lithe_sched_trace_emit(LITHE_ST_WAIT_SYNC_WAKE, NULL, _lt_key, 0, 0);
+        return rc;
+    }
+#endif
     /* lock so nobody can signal us during the list updating */
     opal_thread_internal_mutex_lock(&sync->lock);
 

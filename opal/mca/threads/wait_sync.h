@@ -41,6 +41,7 @@
 #include <lithe/lithe.h>
 #include <lithe/sched_trace.h> /* Perfetto trace points, no-op unless LITHE_SCHED_TRACE=1 */
 #include <parlib/arch.h> /* cpu_relax */
+#include <lithe/futex.h>
 #endif
 
 BEGIN_C_DECLS
@@ -139,6 +140,30 @@ static inline int lithe_wait_sync_release_yield_enabled(void)
         opal_thread_internal_mutex_destroy(&(sync)->lock);     \
     }
 
+#if HAVE_LITHE
+/* LITHE_WAIT_SYNC_DIRECT (base/wait_sync.c): single-OS hosted worlds wait on the
+ * count with a Lithe futex instead of the condvar; the completer wakes it there.
+ * signaling=false stays last: the waiter's (stack) sync may vanish after it. */
+OPAL_DECLSPEC int opal_lithe_wait_sync_direct_resolve(void);
+OPAL_DECLSPEC extern int opal_lithe_wait_sync_direct;
+static inline int opal_lithe_wait_sync_direct_on(void)
+{
+    int v = opal_lithe_wait_sync_direct;
+    return OPAL_LIKELY(v >= 0) ? v : opal_lithe_wait_sync_direct_resolve();
+}
+#define WAIT_SYNC_SIGNAL(sync)                                    \
+    if (opal_using_threads()) {                                   \
+        if (opal_lithe_wait_sync_direct_on()) {                   \
+            futex_wake_all((int *) &(sync)->count);               \
+        } else {                                                  \
+            opal_thread_internal_mutex_lock(&(sync)->lock);       \
+            opal_thread_internal_cond_signal(&(sync)->condition); \
+            opal_thread_internal_mutex_unlock(&(sync)->lock);     \
+        }                                                         \
+        opal_atomic_wmb();                                        \
+        (sync)->signaling = false;                                \
+    }
+#else
 #define WAIT_SYNC_SIGNAL(sync)                                \
     if (opal_using_threads()) {                               \
         opal_thread_internal_mutex_lock(&(sync)->lock);       \
@@ -146,6 +171,7 @@ static inline int lithe_wait_sync_release_yield_enabled(void)
         opal_thread_internal_mutex_unlock(&(sync)->lock);     \
         (sync)->signaling = false;                            \
     }
+#endif
 
 #define WAIT_SYNC_SIGNALLED(sync)  \
     {                              \

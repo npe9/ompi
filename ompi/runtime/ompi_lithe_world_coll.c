@@ -36,6 +36,8 @@
 #include <lithe/fork_join_sched.h>
 #include <lithe/mutex.h>
 #include <parlib/arch.h> /* cpu_relax */
+#include <lithe/futex.h>
+#include <time.h>
 #endif
 
 static int world_coll_mutex_ready = 0;
@@ -368,6 +370,38 @@ typedef struct {
     int is_leader;
     int single_os;    /* whole world on this OS */
 } sc_coll_layout_t;
+
+static bool sc_coll_layout(struct ompi_communicator_t *comm, sc_coll_layout_t *L);
+
+/*
+ * Single-OS worlds take the flat path even with MULTI_EP (2026-10-21; default on,
+ * LITHE_HOSTED_SC_FLAT_COLL_SINGLE_OS=0 restores the old gate). The MULTI_EP
+ * guard above is about the multi-OS hybrid (leaders on cxi); the single-OS
+ * branch never touches the fabric, but the guard disabled it too, so hosted
+ * allreduce fell back to recursive-doubling Sendrecv: 8-byte allreduce, 4
+ * contexts on 3 harts, 15.1 us/op vs 1.07 flat (vanilla shm 0.43-0.57).
+ * LITHE_HOSTED_SC_FLAT_COLL=0 still turns every flat path off.
+ */
+static bool sc_flat_coll_ok(struct ompi_communicator_t *comm, sc_coll_layout_t *L)
+{
+    const char *e;
+    if (!sc_coll_layout(comm, L)) {
+        return false;
+    }
+    if (sc_flat_coll_enabled()) {
+        return true;
+    }
+    if (!L->single_os) {
+        return false;
+    }
+    e = getenv("LITHE_HOSTED_SC_FLAT_COLL");
+    if (NULL != e && '0' == e[0] && '\0' == e[1]) {
+        return false;
+    }
+    e = getenv("LITHE_HOSTED_SC_FLAT_COLL_SINGLE_OS");
+    return !(NULL != e && '0' == e[0]);
+}
+
 
 static bool sc_coll_layout(struct ompi_communicator_t *comm, sc_coll_layout_t *L)
 {
@@ -751,6 +785,25 @@ static int sc_coll_ensure_arena(size_t nbytes)
     if (sc_coll.ready) {
         return OMPI_SUCCESS;
     }
+    /* Once-only init (2026-10-21). This was check-then-init: two ranks entering
+     * their first flat collective together both saw ready==0, and the second
+     * zeroed `arrived` after the first had already taken a ticket, so the ticket
+     * barrier waited for an arrival that never came (all 4 ranks in
+     * sc_coll_ticket_barrier with arrived==1; halo stress hung 3/3 once the
+     * single-OS flat path was on). The CAS winner initializes; the rest wait. */
+    {
+        static opal_atomic_int32_t init_state = 0; /* 0 none, 1 running */
+        int32_t expect = 0;
+        if (!opal_atomic_compare_exchange_strong_32(&init_state, &expect, 1)) {
+            while (!sc_coll.ready) {
+                opal_atomic_rmb();
+#if HAVE_LITHE
+                cpu_relax();
+#endif
+            }
+            return OMPI_SUCCESS;
+        }
+    }
     sc_coll.slot_bytes = OMPI_LITHE_SC_COLL_MAX_BYTES;
     for (b = 0; b < 2; ++b) {
         for (i = 0; i < OMPI_LITHE_SC_COLL_MAX_RANKS; ++i) {
@@ -776,13 +829,38 @@ static int sc_coll_ensure_arena(size_t nbytes)
  *       NO_CQ nanosleep (not RUNNABLE) so waiters do not hoard harts;
  *       rare opal_progress assists same-OS CQ without the every-64 tax.
  */
+/*
+ * LITHE_HOSTED_SC_BARRIER_YIELDS=N (2026-10-21, default 1; 0 = never block, the
+ * old behaviour): a single-OS waiter yields to runnable peers at most N times,
+ * then sleeps in the Lithe futex on `arrived` (1 ms timeout as a safety net); the
+ * arrival that completes the round wakes it. Yield-only waits cost bench/alt
+ * ranks K=8 (8 contexts / 4 harts, imbalanced) 8.7 -> 10.0 ms/iter once the
+ * single-OS flat path was on: light ranks bounced through the run queue while the
+ * heavy ones computed for ms. Budget 8: 9.5-9.6; 1: 8.5-9.1 (= the RD path), at
+ * the price of the flat allreduce's best case (1.8 -> 5.3 us, 4 contexts / 3
+ * harts; the RD Sendrecv path it replaces was 15.0).
+ */
+static int sc_barrier_yields = -1;
+
 static void sc_coll_ticket_barrier(int size, int with_progress)
 {
     int32_t ticket, goal, cur;
     unsigned int spin = 0;
+#if HAVE_LITHE
+    int yields = 0;
+    if (sc_barrier_yields < 0) {
+        const char *e = getenv("LITHE_HOSTED_SC_BARRIER_YIELDS");
+        sc_barrier_yields = e ? atoi(e) : 1;
+    }
+#endif
 
     ticket = opal_atomic_add_fetch_32(&sc_coll.arrived, 1);
     goal = ((ticket + (int32_t) size - 1) / (int32_t) size) * (int32_t) size;
+#if HAVE_LITHE
+    if (!with_progress && sc_barrier_yields > 0 && ticket == goal) {
+        futex_wake_all((int *) &sc_coll.arrived); /* last arrival: release sleepers */
+    }
+#endif
     /* Must atomic-load each spin: a plain cast read can be cached in a
      * register and release early → peers reduce before all slots publish
      * (P1K4 rank0 sum=4, others sum=2/3). */
@@ -852,11 +930,15 @@ static void sc_coll_ticket_barrier(int size, int with_progress)
             } else {
                 cpu_relax();
             }
-        } else if (lithe_fork_join_should_yield_to_runnable()) {
-            lithe_context_yield();
-        } else if (lithe_fork_join_current_runnable_count() > 0) {
-            /* Spare-hart soft_cap: should_yield false but peer needs a hart. */
-            lithe_context_yield();
+        } else if (lithe_fork_join_should_yield_to_runnable() ||
+                   /* Spare-hart soft_cap: should_yield false but peer needs a hart. */
+                   lithe_fork_join_current_runnable_count() > 0) {
+            if (sc_barrier_yields > 0 && ++yields > sc_barrier_yields && lithe_can_block()) {
+                struct timespec rel = {0, 1000000L};
+                (void) futex_wait_timeout((int *) &sc_coll.arrived, (int) cur, &rel);
+            } else {
+                lithe_context_yield();
+            }
         } else {
             cpu_relax();
         }
@@ -1019,7 +1101,7 @@ int ompi_lithe_hosted_sc_coll_barrier(MPI_Comm comm)
     sc_coll_layout_t L;
     int rc;
 
-    if (!sc_flat_coll_enabled() || !sc_coll_layout(comm, &L)) {
+    if (!sc_flat_coll_ok(comm, &L)) {
         return OMPI_ERR_NOT_AVAILABLE;
     }
     if (OMPI_SUCCESS != sc_coll_ensure_arena(1)) {
@@ -1068,7 +1150,7 @@ int ompi_lithe_hosted_sc_coll_allreduce(const void *sendbuf, void *recvbuf,
     const void *src;
     void *acc;
 
-    if (!sc_flat_coll_enabled() || !sc_coll_layout(comm, &L)) {
+    if (!sc_flat_coll_ok(comm, &L)) {
         return OMPI_ERR_NOT_AVAILABLE;
     }
     if (MPI_OP_NULL == op || NULL == datatype) {

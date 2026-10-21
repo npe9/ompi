@@ -21,6 +21,7 @@
 #include <limits.h>
 
 #include "opal/class/opal_list.h"
+#include "opal/class/opal_lifo.h"
 #include "opal/mca/threads/mutex.h"
 #include "opal/runtime/opal_progress.h"
 #include "opal/util/output.h"
@@ -58,6 +59,8 @@ typedef struct {
     ompi_mtl_ofi_request_t *send_req;
     /* Sync-send Lithe context parked until matching recv takes this UE. */
     lithe_context_t *send_waiter;
+    /* LITHE_SC_FREELIST: payloads up to SC_UE_INLINE bytes live here (buf == inl). */
+    char inl[];
 } ompi_mtl_ofi_hosted_sc_ue_t;
 
 OBJ_CLASS_INSTANCE(ompi_mtl_ofi_hosted_sc_ue_t, opal_list_item_t, NULL, NULL);
@@ -66,6 +69,11 @@ typedef struct {
     opal_mutex_t lock;
     opal_list_t posted;
     opal_list_t unexpected;
+    /* LITHE_SC_FREELIST: recycled posted / unexpected entries of THIS slot's
+     * receiver (the sender takes a UE from, and releases a posted entry to, the
+     * destination slot; the receiver does the reverse), lock-free. */
+    opal_lifo_t pr_free;
+    opal_lifo_t ue_free;
 } ompi_mtl_ofi_hosted_sc_slot_t;
 
 typedef struct {
@@ -77,6 +85,67 @@ typedef struct {
 static ompi_mtl_ofi_hosted_sc_slot_t *sc_slots = NULL;
 static unsigned long sc_nslots = 0;
 static int sc_enabled = 0;
+
+/* LITHE_SC_FREELIST (2026-10-21, default ON; =0 restores OBJ_NEW/malloc): recycle
+ * posted and unexpected entries per slot instead of OBJ_NEW/OBJ_RELEASE per
+ * message, and keep unexpected payloads <= SC_UE_INLINE bytes inside the entry
+ * instead of a malloc'd copy (GAPS C17: the hosted path's remaining malloc-arena
+ * waits). A/B, 4 reps: halo 256 KiB 51.4-52.9 -> 49.3-49.9 us, halo 4 KiB -1.5 %,
+ * the rest within noise; stress ALL CLEAN at 4 and 8 contexts, integration OK. */
+/* Atomic lifo ops unconditionally: co-resident ranks run on several harts at once. */
+#define SC_UE_INLINE 4096
+static int sc_freelist = 0;
+
+static ompi_mtl_ofi_hosted_sc_posted_t *sc_pr_get(ompi_mtl_ofi_hosted_sc_slot_t *slot)
+{
+    if (sc_freelist) {
+        opal_list_item_t *it = opal_lifo_pop_atomic(&slot->pr_free);
+        if (NULL != it) {
+            return (ompi_mtl_ofi_hosted_sc_posted_t *) it;
+        }
+    }
+    return OBJ_NEW(ompi_mtl_ofi_hosted_sc_posted_t);
+}
+
+static void sc_pr_put(ompi_mtl_ofi_hosted_sc_slot_t *slot, ompi_mtl_ofi_hosted_sc_posted_t *pr)
+{
+    if (sc_freelist) {
+        opal_lifo_push_atomic(&slot->pr_free, &pr->super);
+    } else {
+        OBJ_RELEASE(pr);
+    }
+}
+
+static ompi_mtl_ofi_hosted_sc_ue_t *sc_ue_get(ompi_mtl_ofi_hosted_sc_slot_t *slot)
+{
+    ompi_mtl_ofi_hosted_sc_ue_t *ue;
+    if (sc_freelist) {
+        opal_list_item_t *it = opal_lifo_pop_atomic(&slot->ue_free);
+        if (NULL != it) {
+            return (ompi_mtl_ofi_hosted_sc_ue_t *) it;
+        }
+        /* OBJ_NEW sizes by the class; allocate the inline payload too. */
+        ue = (ompi_mtl_ofi_hosted_sc_ue_t *) malloc(sizeof(*ue) + SC_UE_INLINE);
+        if (NULL != ue) {
+            OBJ_CONSTRUCT_INTERNAL(ue, OBJ_CLASS(ompi_mtl_ofi_hosted_sc_ue_t));
+        }
+        return ue;
+    }
+    return OBJ_NEW(ompi_mtl_ofi_hosted_sc_ue_t);
+}
+
+static void sc_ue_put(ompi_mtl_ofi_hosted_sc_slot_t *slot, ompi_mtl_ofi_hosted_sc_ue_t *ue)
+{
+    if (ue->buf != ue->inl) {
+        free(ue->buf);
+    }
+    ue->buf = NULL;
+    if (sc_freelist) {
+        opal_lifo_push_atomic(&slot->ue_free, &ue->super);
+    } else {
+        OBJ_RELEASE(ue);
+    }
+}
 
 /*
  * Clear waiter pointers matching w on this slot (lock held). Caller unlocks
@@ -291,7 +360,11 @@ int ompi_mtl_ofi_hosted_sc_init(void)
         OBJ_CONSTRUCT(&sc_slots[i].lock, opal_mutex_t);
         OBJ_CONSTRUCT(&sc_slots[i].posted, opal_list_t);
         OBJ_CONSTRUCT(&sc_slots[i].unexpected, opal_list_t);
+        OBJ_CONSTRUCT(&sc_slots[i].pr_free, opal_lifo_t);
+        OBJ_CONSTRUCT(&sc_slots[i].ue_free, opal_lifo_t);
     }
+    e = getenv("LITHE_SC_FREELIST");
+    sc_freelist = (NULL != e && '0' == e[0]) ? 0 : 1;
     sc_enabled = 1;
     if (!sc_multi_os_world()) {
         /* Single-OS world: every peer goes through the memcpy short-circuit, so
@@ -304,15 +377,17 @@ int ompi_mtl_ofi_hosted_sc_init(void)
          *    the extra spinning waiters cost 9.1-9.6 -> 10.4-10.6 ms/iter, and
          *    miniFE (own intra-process allreduce) does not gain. An explicit
          *    OMPI_MCA_opal_max_thread_in_progress wins.
-         *  - LITHE_MTL_OFI_SC_CQ_EVERY=N (A/B, default 1): poll the OFI CQs on
+         *  - LITHE_MTL_OFI_SC_CQ_EVERY=N (default 64 since 2026-10-21): poll the OFI CQs on
          *    every Nth progress call only; they carry no point-to-point traffic
          *    here, but each call locked and read its own CQ and swept every peer's. */
         const char *mp = getenv("LITHE_SC_MULTI_PROGRESS");
         if (mp && mp[0] == '1' && NULL == getenv("OMPI_MCA_opal_max_thread_in_progress")) {
             opal_max_thread_in_progress = INT_MAX;
         }
+        /* Default 64 since 2026-10-21 (with LITHE_WAIT_SYNC_DIRECT, wait_sync.c):
+         * nothing arrives on these CQs in a single-OS world. =1 polls every call. */
         const char *ce = getenv("LITHE_MTL_OFI_SC_CQ_EVERY");
-        int every = ce ? atoi(ce) : 1;
+        int every = ce ? atoi(ce) : 64;
         ompi_mtl_ofi_sc_cq_every = every > 1 ? every : 1;
     }
     /* wait_sync scarce path: park on posted recv instead of yield→steal. */
@@ -338,7 +413,9 @@ void ompi_mtl_ofi_hosted_sc_finalize(void)
         while (NULL
                != (ue = (ompi_mtl_ofi_hosted_sc_ue_t *) opal_list_remove_first(
                        &sc_slots[i].unexpected))) {
-            free(ue->buf);
+            if (ue->buf != ue->inl) {
+                free(ue->buf);
+            }
             OBJ_RELEASE(ue);
         }
         while (NULL
@@ -346,6 +423,14 @@ void ompi_mtl_ofi_hosted_sc_finalize(void)
                        &sc_slots[i].posted))) {
             OBJ_RELEASE(pr);
         }
+        while (NULL != (ue = (ompi_mtl_ofi_hosted_sc_ue_t *) opal_lifo_pop_atomic(&sc_slots[i].ue_free))) {
+            OBJ_RELEASE(ue);
+        }
+        while (NULL != (pr = (ompi_mtl_ofi_hosted_sc_posted_t *) opal_lifo_pop_atomic(&sc_slots[i].pr_free))) {
+            OBJ_RELEASE(pr);
+        }
+        OBJ_DESTRUCT(&sc_slots[i].ue_free);
+        OBJ_DESTRUCT(&sc_slots[i].pr_free);
         OBJ_DESTRUCT(&sc_slots[i].unexpected);
         OBJ_DESTRUCT(&sc_slots[i].posted);
         OBJ_DESTRUCT(&sc_slots[i].lock);
@@ -401,7 +486,7 @@ int ompi_mtl_ofi_hosted_sc_try_send(struct ompi_communicator_t *comm, int dest,
         }
         if (pr->req->req_started) {
             opal_list_remove_item(&slot->posted, &pr->super);
-            OBJ_RELEASE(pr);
+            sc_pr_put(slot, pr);
             continue;
         }
         matched_recv = pr->req;
@@ -413,7 +498,7 @@ int ompi_mtl_ofi_hosted_sc_try_send(struct ompi_communicator_t *comm, int dest,
         need_ofi_cancel = (pr->ofi_dual && pr->ofi_posted) ? 1 : 0;
         sc_clear_waiter_locked(slot, recv_waiter);
         opal_list_remove_item(&slot->posted, &pr->super);
-        OBJ_RELEASE(pr);
+        sc_pr_put(slot, pr);
         break;
     }
 
@@ -435,22 +520,23 @@ int ompi_mtl_ofi_hosted_sc_try_send(struct ompi_communicator_t *comm, int dest,
     }
 
     /* Unexpected message. */
+    ue = sc_ue_get(slot);
+    if (NULL == ue) {
+        opal_mutex_unlock(&slot->lock);
+        ofi_req->status.MPI_ERROR = OMPI_ERR_OUT_OF_RESOURCE;
+        return 1;
+    }
     payload = NULL;
     if (length > 0) {
-        payload = malloc(length);
+        payload = (sc_freelist && length <= SC_UE_INLINE) ? (void *) ue->inl : malloc(length);
         if (NULL == payload) {
+            ue->buf = NULL;
+            sc_ue_put(slot, ue);
             opal_mutex_unlock(&slot->lock);
             ofi_req->status.MPI_ERROR = OMPI_ERR_OUT_OF_RESOURCE;
             return 1;
         }
         memcpy(payload, start, length);
-    }
-    ue = OBJ_NEW(ompi_mtl_ofi_hosted_sc_ue_t);
-    if (NULL == ue) {
-        free(payload);
-        opal_mutex_unlock(&slot->lock);
-        ofi_req->status.MPI_ERROR = OMPI_ERR_OUT_OF_RESOURCE;
-        return 1;
     }
     ue->buf = payload;
     ue->len = length;
@@ -551,8 +637,7 @@ int ompi_mtl_ofi_hosted_sc_try_irecv(struct ompi_communicator_t *comm, int src,
         if (NULL != sw) {
             lithe_context_unblock(sw);
         }
-        free(ue->buf);
-        OBJ_RELEASE(ue);
+        sc_ue_put(slot, ue);
         return 1;
     }
 
@@ -562,7 +647,7 @@ int ompi_mtl_ofi_hosted_sc_try_irecv(struct ompi_communicator_t *comm, int src,
         return 0;
     }
 
-    pr = OBJ_NEW(ompi_mtl_ofi_hosted_sc_posted_t);
+    pr = sc_pr_get(slot);
     if (NULL == pr) {
         opal_mutex_unlock(&slot->lock);
         return 0;
@@ -602,7 +687,7 @@ void ompi_mtl_ofi_hosted_sc_mark_ofi_posted(ompi_mtl_ofi_request_t *ofi_req)
                                 ompi_mtl_ofi_hosted_sc_posted_t) {
             if (pr->req == ofi_req) {
                 opal_list_remove_item(&slot->posted, &pr->super);
-                OBJ_RELEASE(pr);
+                sc_pr_put(slot, pr);
                 break;
             }
         }
@@ -637,7 +722,7 @@ void ompi_mtl_ofi_hosted_sc_ofi_recv_claimed(ompi_mtl_ofi_request_t *ofi_req)
                             ompi_mtl_ofi_hosted_sc_posted_t) {
         if (pr->req == ofi_req) {
             opal_list_remove_item(&slot->posted, &pr->super);
-            OBJ_RELEASE(pr);
+            sc_pr_put(slot, pr);
             break;
         }
     }
@@ -667,7 +752,7 @@ int ompi_mtl_ofi_hosted_sc_cancel_recv(ompi_mtl_ofi_request_t *ofi_req)
             pr->waiter = NULL;
             sc_clear_waiter_locked(slot, w);
             opal_list_remove_item(&slot->posted, &pr->super);
-            OBJ_RELEASE(pr);
+            sc_pr_put(slot, pr);
             found = 1;
             break;
         }
