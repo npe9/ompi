@@ -17,6 +17,8 @@
 
 #include "mtl_ofi.h"
 #include "mtl_ofi_hosted_sc.h"
+#include "opal/mca/threads/wait_sync.h"
+#include <limits.h>
 
 #include "opal/class/opal_list.h"
 #include "opal/mca/threads/mutex.h"
@@ -113,6 +115,9 @@ static void sc_ssend_park_cb(lithe_context_t *context, void *arg)
     a->ue->send_waiter = context;
     opal_mutex_unlock(&a->slot->lock);
 }
+
+/* Progress calls per OFI CQ poll in a single-OS SC world (1 = every call). */
+int ompi_mtl_ofi_sc_cq_every = 1;
 
 /* True when logical world spans more than one OS process (P>1). */
 static int sc_multi_os_world(void)
@@ -288,6 +293,28 @@ int ompi_mtl_ofi_hosted_sc_init(void)
         OBJ_CONSTRUCT(&sc_slots[i].unexpected, opal_list_t);
     }
     sc_enabled = 1;
+    if (!sc_multi_os_world()) {
+        /* Single-OS world: every peer goes through the memcpy short-circuit, so
+         * (2026-10-20, login node, 4 ranks on 4 harts, 8-byte allreduce):
+         *  - LITHE_SC_MULTI_PROGRESS=1 (opt-in): let every waiter drive progress.
+         *    opal_max_thread_in_progress=1 sent all but one rank to sleep on a
+         *    condvar, and each completion then woke one through the scheduler:
+         *    22.3 -> 12.4 us/op alone, 15.2 -> 8.0 with LITHE_MUTEX_SPIN. NOT the
+         *    default: with more ranks than harts (bench/alt ranks K=8 on 4 harts)
+         *    the extra spinning waiters cost 9.1-9.6 -> 10.4-10.6 ms/iter, and
+         *    miniFE (own intra-process allreduce) does not gain. An explicit
+         *    OMPI_MCA_opal_max_thread_in_progress wins.
+         *  - LITHE_MTL_OFI_SC_CQ_EVERY=N (A/B, default 1): poll the OFI CQs on
+         *    every Nth progress call only; they carry no point-to-point traffic
+         *    here, but each call locked and read its own CQ and swept every peer's. */
+        const char *mp = getenv("LITHE_SC_MULTI_PROGRESS");
+        if (mp && mp[0] == '1' && NULL == getenv("OMPI_MCA_opal_max_thread_in_progress")) {
+            opal_max_thread_in_progress = INT_MAX;
+        }
+        const char *ce = getenv("LITHE_MTL_OFI_SC_CQ_EVERY");
+        int every = ce ? atoi(ce) : 1;
+        ompi_mtl_ofi_sc_cq_every = every > 1 ? every : 1;
+    }
     /* wait_sync scarce path: park on posted recv instead of yield→steal. */
     opal_progress_set_sc_park_callback(ompi_mtl_ofi_hosted_sc_try_park_pending);
     opal_output_verbose(1, opal_common_ofi.output,
@@ -735,7 +762,18 @@ int ompi_mtl_ofi_hosted_sc_try_park_pending(void)
      * between Sendrecv rounds used to return 0 → lithe_context_yield while
      * peers entered flat Barrier (P1K8/P1K16 pairwise flakes).
      */
-    spins = pending ? 128u : 32u;
+    /* LITHE_SC_PARK_SPINS=n (2026-10-20, A/B; default 128 pending / 32): the
+     * caller rechecks its request only between calls, so this spin is the
+     * single-OS wait's polling period. 128 PAUSEs are several us here, about
+     * half of a hosted 8-byte allreduce round (perf: 33 % of its samples). */
+    {
+        static int ps = -2;
+        if (ps == -2) {
+            const char *e = getenv("LITHE_SC_PARK_SPINS");
+            ps = e ? atoi(e) : -1;
+        }
+        spins = ps >= 0 ? (unsigned) ps : (pending ? 128u : 32u);
+    }
     for (i = 0; i < spins; i++) {
         cpu_relax();
     }

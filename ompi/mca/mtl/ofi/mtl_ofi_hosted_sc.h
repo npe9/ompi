@@ -27,6 +27,9 @@ typedef struct ompi_mtl_ofi_request_t ompi_mtl_ofi_request_t;
 
 BEGIN_C_DECLS
 
+/* Progress calls per OFI CQ poll in a single-OS SC world (LITHE_MTL_OFI_SC_CQ_EVERY). */
+extern int ompi_mtl_ofi_sc_cq_every;
+
 int ompi_mtl_ofi_hosted_sc_init(void);
 void ompi_mtl_ofi_hosted_sc_finalize(void);
 

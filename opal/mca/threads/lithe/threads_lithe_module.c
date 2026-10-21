@@ -240,6 +240,18 @@ void opal_threads_lithe_preinit(void) {}
 
 void ensure_main_fj_context(void)
 {
+    /* Called on EVERY OPAL mutex lock and condvar wait. Once the root scheduler
+     * is adopted and entered, re-running the ensure (root lookup + PMIx
+     * registration, with a getenv) was 3-5 % of a hosted 8-byte allreduce
+     * (perf, 2026-10-20). OPAL_LITHE_FJ_FASTPATH=0 restores the old call. */
+    static int fast = -1;
+    if (OPAL_UNLIKELY(fast < 0)) {
+        const char *e = getenv("OPAL_LITHE_FJ_FASTPATH");
+        fast = !(e && e[0] == '0');
+    }
+    if (OPAL_LIKELY(fast && NULL != opal_sched && opal_sched_entered)) {
+        return;
+    }
     opal_threads_lithe_ensure_opal_fork_join_sched();
 }
 
