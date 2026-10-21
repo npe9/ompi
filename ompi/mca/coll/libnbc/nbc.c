@@ -29,6 +29,7 @@
 #include "ompi/mca/coll/base/coll_base_functions.h"
 #include "ompi/mca/coll/base/coll_base_util.h"
 #include "ompi/op/op.h"
+#include "opal/util/proc.h"
 #include "ompi/mca/pml/pml.h"
 
 /* only used in this file */
@@ -678,6 +679,11 @@ int NBC_Start(NBC_Handle *handle) {
   }
 
   OPAL_THREAD_LOCK(&mca_coll_libnbc_component.lock);
+  handle->owner = (void *) opal_proc_local_get();
+  if (ompi_rte_lithe_hosted_multicontext_active) {
+      extern __thread int ompi_coll_libnbc_owned_active;
+      ompi_coll_libnbc_owned_active++;
+  }
   opal_list_append(&mca_coll_libnbc_component.active_requests, (opal_list_item_t *)handle);
   OPAL_THREAD_UNLOCK(&mca_coll_libnbc_component.lock);
 

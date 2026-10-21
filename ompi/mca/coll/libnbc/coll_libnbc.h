@@ -130,6 +130,10 @@ struct ompi_coll_libnbc_request_t {
     NBC_Comminfo *comminfo;
     NBC_Schedule *schedule;
     void *tmpbuf; /* temporary buffer e.g. used for Reduce */
+    /* Hosted Lithe ranks share this process's active_requests list: the rank
+     * that started the request (its per-context opal proc), which alone may
+     * progress it (GAPS B33). */
+    void *owner;
     /* TODO: we should make a handle pointer to a state later (that the user
      * can move request handles) */
 };

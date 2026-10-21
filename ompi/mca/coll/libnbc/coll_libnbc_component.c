@@ -34,6 +34,9 @@
 #include "mpi.h"
 #include "ompi/mca/coll/coll.h"
 #include "ompi/communicator/communicator.h"
+#include "ompi/proc/proc.h"
+#include "opal/util/proc.h"
+#include "opal/mca/threads/wait_sync.h"
 
 /*
  * Public string showing the coll ompi_libnbc component version number
@@ -44,6 +47,82 @@ const char *mca_coll_libnbc_component_version_string =
 
 static int libnbc_priority = 10;
 static bool libnbc_in_progress = false;     /* protect from recursive calls */
+/*
+ * Hosted Lithe ranks (GAPS B33, 2026-10-21): one process, one active_requests
+ * list, many logical ranks. The loop below ran EVERY rank's schedule on whichever
+ * context called opal_progress, and the sends/receives it issued took that
+ * context's identity (opal_proc_local_get() is per context): a receive for rank R
+ * posted from rank S's context lands in S's matching queue, so R's
+ * MPI_Ibarrier/MPI_Iallreduce never completed (hung 3/3 at the first call, 4
+ * ranks; one rank per process was fine). Each rank now progresses only the
+ * requests it started, and the recursion guard is per context (parlib gives every
+ * Lithe context its own TLS) so one rank's pass does not shut the others out.
+ */
+static __thread bool libnbc_in_progress_ctx = false;
+/* Requests this Lithe context started and libnbc has not completed (hosted only). */
+__thread int ompi_coll_libnbc_owned_active = 0;
+
+static __attribute__((unused)) int libnbc_keep_progress(void)
+{
+    return ompi_coll_libnbc_owned_active > 0;
+}
+
+/* Completion as in the shared loop below; the caller holds no lock. */
+static void libnbc_complete_request(ompi_coll_libnbc_request_t *request, int res)
+{
+    if( OMPI_SUCCESS == res || NBC_OK == res || NBC_SUCCESS == res ) {
+        request->super.super.req_status.MPI_ERROR = OMPI_SUCCESS;
+    }
+    else {
+        request->super.super.req_status.MPI_ERROR = res;
+    }
+    if(request->super.super.req_persistent) {
+        /* reset for the next communication */
+        request->row_offset = 0;
+    }
+    if(!request->super.super.req_persistent || !REQUEST_COMPLETE(&request->super.super)) {
+        ompi_request_complete(&request->super.super, true);
+    }
+}
+
+/* Snapshot this rank's requests under the lock, progress them unlocked: only the
+ * owner removes its requests, so the snapshot stays valid while other ranks
+ * progress (and remove) theirs concurrently. */
+static int libnbc_progress_hosted(void)
+{
+#define LIBNBC_HOSTED_BATCH 64
+    ompi_coll_libnbc_request_t *mine[LIBNBC_HOSTED_BATCH], *request;
+    void *me = (void *) opal_proc_local_get();
+    int n = 0, i, res, completed = 0;
+
+    if (libnbc_in_progress_ctx) {
+        return 0;
+    }
+    libnbc_in_progress_ctx = true;
+    OPAL_THREAD_LOCK(&mca_coll_libnbc_component.lock);
+    OPAL_LIST_FOREACH(request, &mca_coll_libnbc_component.active_requests,
+                      ompi_coll_libnbc_request_t) {
+        if (request->owner == me && n < LIBNBC_HOSTED_BATCH) {
+            mine[n++] = request;
+        }
+    }
+    OPAL_THREAD_UNLOCK(&mca_coll_libnbc_component.lock);
+    for (i = 0; i < n; ++i) {
+        res = NBC_Progress(mine[i]);
+        if (NBC_CONTINUE != res) {
+            OPAL_THREAD_LOCK(&mca_coll_libnbc_component.lock);
+            opal_list_remove_item(&mca_coll_libnbc_component.active_requests,
+                                  &mine[i]->super.super.super.super);
+            OPAL_THREAD_UNLOCK(&mca_coll_libnbc_component.lock);
+            ompi_coll_libnbc_owned_active--;
+            libnbc_complete_request(mine[i], res);
+            completed++;
+        }
+    }
+    libnbc_in_progress_ctx = false;
+    return completed;
+#undef LIBNBC_HOSTED_BATCH
+}
 bool libnbc_ibcast_skip_dt_decision = true;
 
 int libnbc_iallgather_algorithm = 0;             /* iallgather user forced algorithm */
@@ -158,6 +237,9 @@ libnbc_open(void)
     /* note: active comms is the number of communicators who have had
        a non-blocking collective started */
     mca_coll_libnbc_component.active_comms = 0;
+#if HAVE_LITHE
+    opal_lithe_wait_sync_keep_progress = libnbc_keep_progress;
+#endif
 
     return OMPI_SUCCESS;
 }
@@ -165,6 +247,9 @@ libnbc_open(void)
 static int
 libnbc_close(void)
 {
+#if HAVE_LITHE
+    opal_lithe_wait_sync_keep_progress = NULL;
+#endif
     if (0 != mca_coll_libnbc_component.active_comms) {
         opal_progress_unregister(ompi_coll_libnbc_progress);
     }
@@ -430,6 +515,10 @@ ompi_coll_libnbc_progress(void)
     if (0 == opal_list_get_size (&mca_coll_libnbc_component.active_requests)) {
         /* no requests -- nothing to do. do not grab a lock */
         return 0;
+    }
+
+    if (ompi_rte_lithe_hosted_multicontext_active) {
+        return libnbc_progress_hosted();
     }
 
     /* process active requests, and use mca_coll_libnbc_component.lock to access the

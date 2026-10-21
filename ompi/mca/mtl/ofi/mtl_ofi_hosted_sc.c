@@ -82,6 +82,27 @@ typedef struct {
     ompi_mtl_ofi_request_t *sreq;
 } sc_ssend_park_arg_t;
 
+/* LITHE_SC_TRACE=1 (debug, default off): ring of every SC send/recv decision,
+ * read with gdb after a hang (GAPS B33). op: 1 send->posted, 2 send->UE,
+ * 3 recv->UE, 4 recv posted, 5 send dropped stale posted. */
+typedef struct { int op, me, peer, tag, cid; void *req; } sc_trace_t;
+#define SC_TRACE_N 65536
+sc_trace_t ompi_mtl_ofi_sc_trace[SC_TRACE_N];
+opal_atomic_int64_t ompi_mtl_ofi_sc_trace_i = 0;
+static int sc_trace_on = -1;
+static inline void sc_trace(int op, int me, int peer, int tag, int cid, void *req)
+{
+    if (sc_trace_on < 0) {
+        const char *e = getenv("LITHE_SC_TRACE");
+        sc_trace_on = (e && e[0] == '1');
+    }
+    if (sc_trace_on) {
+        int64_t i = opal_atomic_fetch_add_64(&ompi_mtl_ofi_sc_trace_i, 1) & (SC_TRACE_N - 1);
+        sc_trace_t t = {op, me, peer, tag, cid, req};
+        ompi_mtl_ofi_sc_trace[i] = t;
+    }
+}
+
 static ompi_mtl_ofi_hosted_sc_slot_t *sc_slots = NULL;
 static unsigned long sc_nslots = 0;
 static int sc_enabled = 0;
@@ -485,10 +506,12 @@ int ompi_mtl_ofi_hosted_sc_try_send(struct ompi_communicator_t *comm, int dest,
             continue;
         }
         if (pr->req->req_started) {
+            sc_trace(5, src_rank, (int) peer->super.proc_name.vpid, tag, cid, pr->req);
             opal_list_remove_item(&slot->posted, &pr->super);
             sc_pr_put(slot, pr);
             continue;
         }
+        sc_trace(1, src_rank, (int) peer->super.proc_name.vpid, tag, cid, pr->req);
         matched_recv = pr->req;
         matched_dst = pr->buf;
         matched_comm = pr->req->comm;
@@ -538,6 +561,7 @@ int ompi_mtl_ofi_hosted_sc_try_send(struct ompi_communicator_t *comm, int dest,
         }
         memcpy(payload, start, length);
     }
+    sc_trace(2, src_rank, (int) peer->super.proc_name.vpid, tag, cid, NULL);
     ue->buf = payload;
     ue->len = length;
     ue->tag = tag;
@@ -628,6 +652,7 @@ int ompi_mtl_ofi_hosted_sc_try_irecv(struct ompi_communicator_t *comm, int src,
             continue;
         }
         opal_list_remove_item(&slot->unexpected, &ue->super);
+        sc_trace(3, (int) opal_proc_local_get()->proc_name.vpid, ue->src_rank, ue->tag, cid, ofi_req);
         if (ue->is_sync) {
             sw = sc_release_ssend(ue);
         }
@@ -660,6 +685,7 @@ int ompi_mtl_ofi_hosted_sc_try_irecv(struct ompi_communicator_t *comm, int src,
     pr->ofi_dual = 0;
     pr->ofi_posted = 0;
     pr->waiter = NULL;
+    sc_trace(4, (int) opal_proc_local_get()->proc_name.vpid, src, tag, cid, ofi_req);
     opal_list_append(&slot->posted, &pr->super);
     opal_mutex_unlock(&slot->lock);
 

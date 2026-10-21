@@ -145,6 +145,10 @@ static inline int lithe_wait_sync_release_yield_enabled(void)
  * count with a Lithe futex instead of the condvar; the completer wakes it there.
  * signaling=false stays last: the waiter's (stack) sync may vanish after it. */
 OPAL_DECLSPEC int opal_lithe_wait_sync_direct_resolve(void);
+/* Set by components whose requests advance only in opal_progress (coll/libnbc):
+ * nonzero while the CALLING Lithe context owns such a request, so its waits keep
+ * polling instead of sleeping (GAPS B33). */
+OPAL_DECLSPEC extern int (*opal_lithe_wait_sync_keep_progress)(void);
 OPAL_DECLSPEC extern int opal_lithe_wait_sync_direct;
 static inline int opal_lithe_wait_sync_direct_on(void)
 {

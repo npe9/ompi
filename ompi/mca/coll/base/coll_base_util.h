@@ -78,11 +78,25 @@ struct ompi_coll_base_nbc_request_t {
 
 OMPI_DECLSPEC OBJ_CLASS_DECLARATION(ompi_coll_base_nbc_request_t);
 
+/* Per-Lithe-context tag counter for hosted ranks sharing a communicator, or NULL
+ * (coll_base_frame.c, GAPS B33). */
+OMPI_DECLSPEC int32_t *ompi_coll_base_lithe_nbc_tag_slot(struct ompi_communicator_t *comm);
+
 static inline int32_t
 ompi_coll_base_nbc_reserve_tags(ompi_communicator_t* comm, int32_t reserve)
 {
     int32_t tag, old_tag;
+    int32_t *mine;
     assert( reserve > 0 );
+    mine = ompi_coll_base_lithe_nbc_tag_slot(comm);
+    if (NULL != mine) {  /* private to this rank: no atomics needed */
+        tag = *mine;
+        if ((tag - reserve) < MCA_COLL_BASE_TAG_NONBLOCKING_END) {
+            tag = MCA_COLL_BASE_TAG_NONBLOCKING_BASE;
+        }
+        *mine = tag - reserve;
+        return tag;
+    }
   reread_tag:  /* In case we fail to atomically update the tag */
     tag = old_tag = comm->c_nbc_tag;
     if ((tag - reserve) < MCA_COLL_BASE_TAG_NONBLOCKING_END) {

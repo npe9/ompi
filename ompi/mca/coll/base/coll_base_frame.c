@@ -37,6 +37,10 @@
 #include "ompi/mca/coll/base/base.h"
 #include "ompi/mca/coll/base/coll_base_functions.h"
 #include "ompi/proc/proc.h"
+#include "ompi/communicator/communicator.h"
+#include "opal/sys/atomic.h"
+#include "ompi/mca/coll/base/coll_tags.h"
+#include <string.h>
 
 #if defined(__has_include)
 #    if __has_include(<parlib/dtls.h>)
@@ -72,6 +76,10 @@ typedef struct {
         mca_coll_base_comm_t *shadow;
     } topo[8];
     int ntopo;
+    /* Per-context nonblocking-collective tag counters, indexed by local cid
+     * (GAPS B33): see ompi_coll_base_lithe_nbc_tag_slot. 0 = not yet used. */
+    int32_t *nbc_tag;
+    uint32_t nbc_tag_n;
 } ompi_coll_lithe_reqs_t;
 
 static dtls_key_t ompi_coll_lithe_reqs_dtls_key;
@@ -84,17 +92,36 @@ static void ompi_coll_lithe_reqs_dtor(void *value)
         return;
     }
     free(slot->reqs);
+    free(slot->nbc_tag);
     free(slot);
 }
 
+/* Once-only (2026-10-21, GAPS B33). This was check-then-create: two hosted ranks
+ * reaching their first collective together each created a key, the second store
+ * replaced the first, and a rank that had already set its slot under the first
+ * key found NULL under the second -> a fresh slot. Its per-context nonblocking
+ * tag counter restarted (its 2nd MPI_Iallreduce reused tag -33 while the peers
+ * sent -34: hung ~4 % of runs, 4 ranks / 3 harts; an SC match trace showed the
+ * repeated round-0 post), and the B21 topology caches could be lost the same way. */
 static void ompi_coll_lithe_reqs_dtls_init(void)
 {
+    static opal_atomic_int32_t state = 0; /* 0 none, 1 creating */
+    int32_t expect = 0;
+    dtls_key_t key;
+
     if (ompi_coll_lithe_reqs_dtls_ready) {
         return;
     }
-    ompi_coll_lithe_reqs_dtls_key = dtls_key_create(ompi_coll_lithe_reqs_dtor);
-    ompi_coll_lithe_reqs_dtls_ready =
-        (NULL == ompi_coll_lithe_reqs_dtls_key) ? -1 : 1;
+    if (!opal_atomic_compare_exchange_strong_32(&state, &expect, 1)) {
+        while (0 == ompi_coll_lithe_reqs_dtls_ready) {
+            opal_atomic_rmb();
+        }
+        return;
+    }
+    key = dtls_key_create(ompi_coll_lithe_reqs_dtor);
+    ompi_coll_lithe_reqs_dtls_key = key;
+    opal_atomic_wmb();
+    ompi_coll_lithe_reqs_dtls_ready = (NULL == key) ? -1 : 1;
 }
 #endif /* OMPI_COLL_HAVE_PARLIB_DTLS */
 
@@ -188,6 +215,51 @@ static ompi_coll_lithe_reqs_t *ompi_coll_lithe_slot(void)
     return slot;
 }
 #endif
+
+/* GAPS B33 (2026-10-21): comm->c_nbc_tag is per communicator, and hosted Lithe
+ * ranks share one communicator struct, so every co-resident rank's
+ * MPI_Iallreduce/MPI_Ibarrier/... took the NEXT tag from one counter: 4 ranks got
+ * 4 different tags and nothing matched (hung at the first call, 3/3). MPI orders
+ * collectives per communicator, so a counter per rank per communicator stays in
+ * step across ranks. Returns NULL (use the shared counter) when one rank owns the
+ * process or there is no Lithe context. */
+int32_t *ompi_coll_base_lithe_nbc_tag_slot(struct ompi_communicator_t *comm)
+{
+#if OMPI_COLL_HAVE_PARLIB_DTLS
+    ompi_coll_lithe_reqs_t *slot;
+    uint32_t cid;
+
+    if (!ompi_rte_lithe_hosted_multicontext_active) {
+        return NULL;
+    }
+    slot = ompi_coll_lithe_slot();
+    if (NULL == slot) {
+        return NULL;
+    }
+    cid = ompi_comm_get_local_cid(comm);
+    if (cid >= slot->nbc_tag_n) {
+        uint32_t n = slot->nbc_tag_n ? slot->nbc_tag_n : 16;
+        int32_t *t;
+        while (n <= cid) {
+            n *= 2;
+        }
+        t = (int32_t *) realloc(slot->nbc_tag, n * sizeof(*t));
+        if (NULL == t) {
+            return NULL;
+        }
+        memset(t + slot->nbc_tag_n, 0, (n - slot->nbc_tag_n) * sizeof(*t));
+        slot->nbc_tag = t;
+        slot->nbc_tag_n = n;
+    }
+    if (0 == slot->nbc_tag[cid]) {
+        slot->nbc_tag[cid] = MCA_COLL_BASE_TAG_NONBLOCKING_BASE;
+    }
+    return &slot->nbc_tag[cid];
+#else
+    (void) comm;
+    return NULL;
+#endif
+}
 
 /* The coll data whose cached_* topology fields the calling rank may use.
  * Normally the module's own; for hosted Lithe ranks sharing one communicator,

@@ -80,6 +80,7 @@ static opal_atomic_int32_t num_thread_in_progress = 0;
  * futex (WAIT_SYNC_SIGNAL). Direct waiters are not on the wait-sync list, so a
  * global error wakeup reaches them only through the timeout's recheck. */
 int opal_lithe_wait_sync_direct = -1;
+int (*opal_lithe_wait_sync_keep_progress)(void) = NULL;
 static unsigned lithe_wsd_spin = 256, lithe_wsd_progress = 32, lithe_wsd_timeout_us = 100;
 /* LITHE_WAIT_SYNC_DIRECT_IDLE_SPIN (default 1; 0 = always sleep after the spin
  * budget). Within the budget a waiter yields to runnable peers as before; when the
@@ -125,6 +126,17 @@ int opal_lithe_wait_sync_direct_resolve(void)
 static void lithe_sync_wait_direct_sleep(ompi_wait_sync_t *sync)
 {
     int32_t c = sync->count;
+    if (NULL != opal_lithe_wait_sync_keep_progress && opal_lithe_wait_sync_keep_progress()) {
+        /* Our libnbc schedule advances only when we call opal_progress, and its
+         * internal receives do not wake this sync: sleeping cost a 100 us timeout
+         * per round (Iallreduce 300-450 us/op, Ibarrier 8 ranks / 3 harts hung). */
+        if (lithe_fork_join_current_runnable_count() > 0) {
+            lithe_context_yield();
+        } else {
+            cpu_relax();
+        }
+        return;
+    }
     if (c > 0 && lithe_can_block()) {
         struct timespec rel = {0, (long) lithe_wsd_timeout_us * 1000L};
         (void) futex_wait_timeout((int *) &sync->count, (int) c, &rel);
@@ -232,7 +244,13 @@ int ompi_sync_wait_mt(ompi_wait_sync_t *sync)
      *  - our sync has been triggered.
      */
 check_status:
-    if (sync != opal_threads_base_wait_sync_list && num_thread_in_progress >= opal_max_thread_in_progress) {
+    if (sync != opal_threads_base_wait_sync_list && num_thread_in_progress >= opal_max_thread_in_progress
+#if HAVE_LITHE
+        /* hosted: libnbc progresses only the owner's requests, so an owner must not
+         * sleep here waiting for the elected progress thread (GAPS B33) */
+        && !(NULL != opal_lithe_wait_sync_keep_progress && opal_lithe_wait_sync_keep_progress())
+#endif
+        ) {
         opal_thread_internal_cond_wait(&sync->condition, &sync->lock);
 
         /**
