@@ -116,7 +116,7 @@ int opal_lithe_wait_sync_direct_resolve(void)
     }
     if ((e = getenv("LITHE_WAIT_SYNC_DIRECT_SPIN"))) lithe_wsd_spin = (unsigned) atoi(e);
     if ((e = getenv("LITHE_WAIT_SYNC_DIRECT_PROGRESS")) && atoi(e) > 0) lithe_wsd_progress = (unsigned) atoi(e);
-    if ((e = getenv("LITHE_WAIT_SYNC_DIRECT_TIMEOUT_US")) && atoi(e) > 0) lithe_wsd_timeout_us = (unsigned) atoi(e);
+    if ((e = getenv("LITHE_WAIT_SYNC_DIRECT_TIMEOUT_US")) && atoi(e) >= 0) lithe_wsd_timeout_us = (unsigned) atoi(e); /* 0 = untimed */
     if ((e = getenv("LITHE_WAIT_SYNC_DIRECT_IDLE_SPIN"))) lithe_wsd_idle_spin = ('0' != e[0]);
     if ((e = getenv("LITHE_WAIT_SYNC_DIRECT_YIELDS"))) lithe_wsd_yields = atoi(e);
     opal_lithe_wait_sync_direct = 1;
@@ -138,8 +138,16 @@ static void lithe_sync_wait_direct_sleep(ompi_wait_sync_t *sync)
         return;
     }
     if (c > 0 && lithe_can_block()) {
-        struct timespec rel = {0, (long) lithe_wsd_timeout_us * 1000L};
-        (void) futex_wait_timeout((int *) &sync->count, (int) c, &rel);
+        if (0 == lithe_wsd_timeout_us) {
+            /* Untimed: the timer arm + cancel per sleep was ~8 % of a hosted halo
+             * loop (parlib_timer_cancel). Safe for what we know needs opal_progress
+             * only because owners of libnbc requests never get here
+             * (opal_lithe_wait_sync_keep_progress above). */
+            (void) futex_wait((int *) &sync->count, (int) c);
+        } else {
+            struct timespec rel = {0, (long) lithe_wsd_timeout_us * 1000L};
+            (void) futex_wait_timeout((int *) &sync->count, (int) c, &rel);
+        }
     }
 }
 
