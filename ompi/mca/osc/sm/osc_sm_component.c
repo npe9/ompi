@@ -425,6 +425,13 @@ component_select(struct ompi_win_t *win, void **base, size_t size, int disp_unit
             goto error;
         }
 
+#if HAVE_LITHE
+        /* Lithified: ranks are contexts that may share a hart; a process-shared
+         * pthread condvar wait would sleep the hart with the rank that has to
+         * arrive next still queued on it. Always fence with the (cooperative)
+         * barrier. */
+        flag = 0;
+#endif
         if (flag && blocking_fence) {
             ret = pthread_mutexattr_init(&mattr);
             ret = pthread_mutexattr_setpshared(&mattr, PTHREAD_PROCESS_SHARED);
