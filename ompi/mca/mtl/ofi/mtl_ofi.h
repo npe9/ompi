@@ -629,6 +629,13 @@ ompi_mtl_ofi_context_process_cq(int ctxt_id, struct fi_cq_tagged_entry *wc, ssiz
                                    "*** The Open MPI OFI MTL is aborting the MPI job (via exit(3)).\n",
                                    __FILE__, __LINE__, ret);
                     fflush(stderr);
+                    /* GAPS B58 diagnostic (default off): dump core with the CQ entry. */
+                    if (NULL != getenv("LITHE_MTL_OFI_CQ_ABORT")) {
+                        fprintf(stderr, "[cq_abort] ctxt=%d i=%d/%d op_context=%p flags=0x%lx len=%zu tag=0x%lx\n",
+                                ctxt_id, i, events_read, wc[i].op_context,
+                                (unsigned long) wc[i].flags, wc[i].len, (unsigned long) wc[i].tag);
+                        abort();
+                    }
                     exit(1);
                 }
             }
@@ -1144,6 +1151,40 @@ ompi_mtl_ofi_progress_after_eagain(int ctxt_id)
  * park puts an EQ-interrupt + reactor wake on the critical path of the remote match;
  * the harts it frees were not what the peers lacked. Keep default 0; the exCID bit is
  * not reachable on a login singleton (MPI_Comm_create_from_group needs a PMIx server). */
+/* LITHE_MTL_OFI_WAIT_DEMAND (2026-10-25, GAPS B58, DEFAULT ON; =0 restores): the own-CQ
+ * completion waits (MTL_OFI_LITHE_WAIT_WHILE: blocking send, exCID handshake) give the
+ * hart up -- one lithe_context_yield -- every 64 polls while a runnable context of this
+ * scheduler has no hart. Without it, 8 contexts on 3 harts deadlocked ~3-9 % of the time
+ * on 64 KiB MPI_Send (.build_logs/progress/b58/, hang_*.bt): a rendezvous send completes
+ * only after the receiver posts its receive; even ranks held all three harts polling for
+ * that completion while the odd ranks that had to post it sat RUNNABLE with no hart.
+ * Unlike LITHE_MTL_OFI_NOSPIN bit 0 (park on the CQ fd, NEGATIVE: wake latency on the
+ * critical path even when harts are free) this costs nothing unless a context is
+ * actually starved: one load per 64 polls. A yield is safe here, unlike the EAGAIN
+ * retry (rule 3): the operation is posted and the NIC produces the completion.
+ * A/B (.build_logs/progress/b58/ab.txt, cxi loopback LITHE_MTL_OFI_HOSTED_SC=0, 3 harts,
+ * n=150 interleaved, us/op): MPI_Ssend 64 KiB at 8 contexts HUNG 150/150 -> 149/150 ok
+ * (136 us); MPI_Send 64 KiB w50 at 8 contexts 5/150 hangs -> 0, median 210 -> 192, p90
+ * 281 -> 202; 8 B parity (148.7 / 146.2); 4 contexts 121.5 -> 123.0 (+1.2 %). The
+ * stale-callback abort (mtl_ofi.h "Error returned by request event callback") is a
+ * separate bug, same rate in both arms (5/450 vs 6/450). */
+static long ompi_mtl_ofi_wait_demand_yields; /* LITHE_MTL_OFI_WAIT_DEMAND_STATS */
+__attribute__((destructor, unused)) static void ompi_mtl_ofi_wait_demand_report(void)
+{
+    if (ompi_mtl_ofi_wait_demand_yields > 0 && NULL != getenv("LITHE_MTL_OFI_WAIT_DEMAND_STATS")) {
+        fprintf(stderr, "[wait_demand] %s: %ld yields\n", __FILE__, ompi_mtl_ofi_wait_demand_yields);
+    }
+}
+static inline int ompi_mtl_ofi_wait_demand(void)
+{
+    static int cached = -1;
+    if (OPAL_UNLIKELY(cached < 0)) {
+        const char *e = getenv("LITHE_MTL_OFI_WAIT_DEMAND");
+        cached = (e && '0' == e[0]) ? 0 : 1;
+    }
+    return cached;
+}
+
 static inline int ompi_mtl_ofi_nospin_mask(void)
 {
     static int cached = -1;
@@ -1204,9 +1245,18 @@ static inline int ompi_mtl_ofi_nospin_park(int ctxt_id)
     do {                                                                     \
         const int _ns_on = (ompi_mtl_ofi_nospin_mask() & (BIT)) &&           \
                            ompi_mtl_ofi_lithe_multicontext_active();          \
-        unsigned _ns_i = 0;                                                  \
+        const int _dm_on = ompi_mtl_ofi_wait_demand() &&                     \
+                           ompi_mtl_ofi_lithe_multicontext_active() &&        \
+                           lithe_can_block();                                \
+        unsigned _ns_i = 0, _dm_i = 0;                                       \
         while (COND) {                                                       \
             ompi_mtl_ofi_progress_after_eagain(CTXT_ID);                     \
+            if (_dm_on && 0 == (++_dm_i & 63u) && (COND) &&                  \
+                lithe_fork_join_current_hartless_runnable() > 0) {           \
+                ompi_mtl_ofi_wait_demand_yields++; /* racy stat, fine */     \
+                lithe_context_yield(); /* B58: a starved peer posts the match */ \
+                continue;                                                    \
+            }                                                                \
             if (!_ns_on || !(COND)) {                                        \
                 continue;                                                    \
             }                                                                \
@@ -2475,9 +2525,16 @@ ompi_mtl_ofi_recv_callback(struct fi_cq_tagged_entry *wc,
         }
     }
 
+    /* GAPS B58: read the status BEFORE completing. completion_callback marks the request
+     * complete; under Lithe the owning rank is another context that may already be waiting
+     * in mca_pml_cm_recv on this hart's peer sweep, return as soon as it is resumed, and reuse
+     * the stack that holds req_status (pml_cm_recv allocates the request on its stack). Reading
+     * status->MPI_ERROR afterwards returned stale stack bytes ~1-2 % of 64 KiB cxi runs at 8
+     * contexts / 3 harts, which process_cq treated as a callback error and exit(1)'d. */
+    ompi_ret = status->MPI_ERROR;
     ofi_req->super.completion_callback(&ofi_req->super);
 
-    return status->MPI_ERROR;
+    return ompi_ret;
 }
 
 /**
@@ -2680,9 +2737,11 @@ ompi_mtl_ofi_mrecv_callback(struct fi_cq_tagged_entry *wc,
 
     free(ofi_req);
 
+    /* GAPS B58: capture before completing; see ompi_mtl_ofi_recv_callback. */
+    ompi_ret = status->MPI_ERROR;
     mrecv_req->completion_callback(mrecv_req);
 
-    return status->MPI_ERROR;
+    return ompi_ret;
 }
 
 /**
