@@ -612,6 +612,11 @@ static void sc_prog_queue_locked(ompi_mtl_ofi_hosted_sc_slot_t *slot,
  * Needs the completion contexts below AND the SC barrier idle-block (ompi_lithe_world_coll.c,
  * default on); either alone still hung bigred 1 MiB (fix_ab2.txt). */
 static size_t sc_dma_min = 1048576;
+/* LITHE_SC_DMA_BLOCKING (DEFAULT 1, =0 memcpys): a blocking Send whose receive is already
+ * posted also DMAs and parks until the NIC has read its buffer, so its hart runs other ranks.
+ * blk.txt, p2p_despin send, n=10, 3 harts, median us/op memcpy -> DMA: 8 ctx 4 MiB 1458 ->
+ * 1232, 16 MiB 4801 -> 4517 (w=0), 6218 -> 5979 (w=500); 2 ctx 0.94-1.00x. 0 failures. */
+static int sc_dma_blocking = 1;
 static uint32_t sc_dma_seq;
 static long sc_dma_n, sc_dma_bytes; /* LITHE_SC_DMA_STATS */
 long ompi_mtl_ofi_sc_dma_rx_n, ompi_mtl_ofi_sc_dma_tx_n; /* completions (gdb-visible) */
@@ -1017,6 +1022,17 @@ int ompi_mtl_ofi_hosted_sc_init(void)
     if (NULL != e) {
         sc_dma_min = atol(e) > 0 ? (size_t) atol(e) : 0;
     }
+    e = getenv("LITHE_SC_DMA_BLOCKING");
+    if (NULL != e) {
+        sc_dma_blocking = ('0' != e[0]);
+    }
+    /* DMA completions arrive asynchronously; with every hart spinning in an SC collective
+     * wait and no idle-block, nothing delivers them (GAPS B59: 7/10 hung). Refuse. */
+    e = getenv("LITHE_HOSTED_SC_BARRIER_IDLE_BLOCK");
+    if (sc_dma_min > 0 && NULL != e && atoi(e) <= 0) {
+        opal_output(0, "mtl:ofi: LITHE_SC_DMA disabled: needs LITHE_HOSTED_SC_BARRIER_IDLE_BLOCK > 0");
+        sc_dma_min = 0;
+    }
     e = getenv("LITHE_SC_DMA_EPCTX");
     sc_dma_epctx = (NULL == e || '0' != e[0]);
     opal_output_verbose(1, opal_common_ofi.output,
@@ -1207,10 +1223,11 @@ int ompi_mtl_ofi_hosted_sc_try_send(struct ompi_communicator_t *comm, int dest,
         return 1;
     }
 
-    if (NULL != matched_recv && is_isend && !free_after && dest != src_rank
+    if (NULL != matched_recv && (is_isend ? !free_after : sc_dma_blocking) && dest != src_rank
         && !need_ofi_cancel && sc_dma_eligible(length, matched_recv, matched_dst)
         && NULL != (ue = sc_ue_get(slot))) {
-        /* LITHE_SC_DMA: the NIC moves the bytes; this Isend returns at once. */
+        /* LITHE_SC_DMA: the NIC moves the bytes; an Isend returns at once, a blocking Send
+         * (LITHE_SC_DMA_BLOCKING) parks until the NIC has read its buffer, freeing its hart. */
         matched_recv->req_started = true;
         ue->buf = start;
         ue->len = length;
@@ -1219,7 +1236,7 @@ int ompi_mtl_ofi_hosted_sc_try_send(struct ompi_communicator_t *comm, int dest,
         ue->cid = cid;
         ue->is_sync = 1;
         ue->borrowed = 1;
-        ue->send_is_isend = 1;
+        ue->send_is_isend = is_isend ? 1 : 0;
         ue->send_req = ofi_req;
         ue->send_waiter = NULL;
         ue->rreq = matched_recv;
@@ -1229,8 +1246,28 @@ int ompi_mtl_ofi_hosted_sc_try_send(struct ompi_communicator_t *comm, int dest,
         sc_unlock(slot);
         if (!sc_dma_issue(comm, slot, ue)) {
             sc_ue_put(slot, ue);
+            ofi_req->completion_count = is_isend ? 1 : 0;
             sc_finish_recv(matched_recv, matched_dst, src_rank, tag, start, length);
-            sc_finish_send(ofi_req, true, free_after, start);
+            sc_finish_send(ofi_req, is_isend, free_after, start);
+        } else if (!is_isend) {
+            sc_ssend_park_arg_t parg;
+
+            if (NULL != recv_waiter) {
+                lithe_context_unblock(recv_waiter);
+                recv_waiter = NULL;
+            }
+            sc_lock(slot);
+            while (ofi_req->completion_count > 0) {
+                parg.slot = slot;
+                parg.ue = ue;
+                parg.sreq = ofi_req;
+                lithe_context_block(sc_ssend_park_cb, &parg);
+                sc_lock(slot);
+            }
+            sc_unlock(slot);
+            if (free_after && NULL != start) {
+                free(start);
+            }
         }
         if (NULL != recv_waiter) {
             lithe_context_unblock(recv_waiter);

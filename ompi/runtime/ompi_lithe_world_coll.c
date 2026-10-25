@@ -911,12 +911,8 @@ static int sc_barrier_smart = -1;
  * together with the DMA completion contexts (fix_ab*.txt). */
 static int sc_barrier_idle_block = -1;
 
-static void sc_coll_ticket_barrier(int size, int with_progress)
+static void sc_barrier_knobs_init(void)
 {
-    int32_t ticket, goal, cur;
-    unsigned int spin = 0;
-#if HAVE_LITHE
-    int yields = 0;
     if (sc_barrier_yields < 0) {
         const char *e = getenv("LITHE_HOSTED_SC_BARRIER_YIELDS");
         sc_barrier_yields = e ? atoi(e) : 1;
@@ -925,6 +921,15 @@ static void sc_coll_ticket_barrier(int size, int with_progress)
         e = getenv("LITHE_HOSTED_SC_BARRIER_IDLE_BLOCK");
         sc_barrier_idle_block = e ? atoi(e) : 1024;
     }
+}
+
+static void sc_coll_ticket_barrier(int size, int with_progress)
+{
+    int32_t ticket, goal, cur;
+    unsigned int spin = 0;
+#if HAVE_LITHE
+    int yields = 0;
+    sc_barrier_knobs_init();
     unsigned int idle_spins = 0;
 #endif
 
@@ -1047,12 +1052,30 @@ static int sc_coll_multi_os_progress_mode(const sc_coll_layout_t *L)
     return (L->num_os >= 4) ? 2 : 1;
 }
 
+/* Epoch publish/wait idle-block (2026-10-25, same gate as the barrier:
+ * LITHE_HOSTED_SC_BARRIER_IDLE_BLOCK). The single-OS epoch wait cpu_relax'ed forever when
+ * nothing was runnable, the shape that deadlocked the barrier (GAPS B59). A waiter past the
+ * idle budget counts itself in sc_epoch_sleepers, rechecks, and blocks on the epoch word;
+ * publishers wake only when somebody sleeps (one load on the hot path). */
+static opal_atomic_int32_t sc_epoch_sleepers = 0;
+static inline void sc_epoch_publish(opal_atomic_int32_t *slot, int32_t v)
+{
+    opal_atomic_swap_32(slot, v);
+#if HAVE_LITHE
+    if (OPAL_UNLIKELY(0 != opal_atomic_add_fetch_32(&sc_epoch_sleepers, 0))) {
+        futex_wake_all((int *) slot);
+    }
+#endif
+}
+
 /* Spin/yield until atomic epoch[bank] matches expect (result or partial ready). */
 static void sc_coll_wait_epoch(opal_atomic_int32_t *epoch_slot, int32_t expect,
                                int with_progress)
 {
     unsigned int spin = 0;
 #if HAVE_LITHE
+    unsigned int idle = 0;
+    sc_barrier_knobs_init();
     static int mtp_cached = -1;
     if (mtp_cached < 0) {
         const char *me = getenv("OMPI_MCA_opal_max_thread_in_progress");
@@ -1087,7 +1110,18 @@ static void sc_coll_wait_epoch(opal_atomic_int32_t *epoch_slot, int32_t expect,
             }
         } else if (lithe_fork_join_should_yield_to_runnable() ||
                    lithe_fork_join_current_runnable_count() > 0) {
+            idle = 0;
             lithe_context_yield();
+        } else if (sc_barrier_idle_block > 0 && ++idle >= (unsigned int) sc_barrier_idle_block &&
+                   lithe_can_block()) {
+            int32_t cur;
+            idle = 0;
+            opal_atomic_add_fetch_32(&sc_epoch_sleepers, 1); /* SEQ_CST: before the recheck */
+            cur = opal_atomic_add_fetch_32(epoch_slot, 0);
+            if (cur != expect) {
+                (void) futex_wait((int *) epoch_slot, (int) cur);
+            }
+            opal_atomic_add_fetch_32(&sc_epoch_sleepers, -1);
         } else {
             cpu_relax();
         }
@@ -1332,7 +1366,7 @@ int ompi_lithe_hosted_sc_coll_allreduce(const void *sendbuf, void *recvbuf,
         }
         opal_atomic_wmb();
         if (pub_ready) {
-            opal_atomic_swap_32(&sc_coll.slot_ready[bank][L.rank], epoch);
+            sc_epoch_publish(&sc_coll.slot_ready[bank][L.rank], epoch);
         } else {
             sc_coll_ticket_barrier((int) L.rph, prog);
         }
@@ -1391,7 +1425,7 @@ int ompi_lithe_hosted_sc_coll_allreduce(const void *sendbuf, void *recvbuf,
                 return OMPI_ERROR;
             }
             opal_atomic_wmb();
-            opal_atomic_swap_32(&sc_coll.result_epoch[bank], epoch);
+            sc_epoch_publish(&sc_coll.result_epoch[bank], epoch);
             if (use_gate) {
                 sc_coll_gate_release(snap);
             }
@@ -1420,7 +1454,7 @@ int ompi_lithe_hosted_sc_coll_allreduce(const void *sendbuf, void *recvbuf,
                                    sc_coll.partial_buf[bank], count, datatype);
                 }
                 opal_atomic_wmb();
-                opal_atomic_swap_32(&sc_coll.partial_epoch[bank], epoch);
+                sc_epoch_publish(&sc_coll.partial_epoch[bank], epoch);
             }
             if (use_gate) {
                 sc_coll_gate_wait(snap);
@@ -1461,7 +1495,7 @@ int ompi_lithe_hosted_sc_coll_allreduce(const void *sendbuf, void *recvbuf,
                 return OMPI_ERROR;
             }
             opal_atomic_wmb();
-            opal_atomic_swap_32(&sc_coll.result_epoch[bank], epoch);
+            sc_epoch_publish(&sc_coll.result_epoch[bank], epoch);
         } else {
             if (sc_coll_concurrent_local_partial(&L) && 1 == L.local_slot) {
                 base = L.leader_rank;
@@ -1482,7 +1516,7 @@ int ompi_lithe_hosted_sc_coll_allreduce(const void *sendbuf, void *recvbuf,
                                    sc_coll.partial_buf[bank], count, datatype);
                 }
                 opal_atomic_wmb();
-                opal_atomic_swap_32(&sc_coll.partial_epoch[bank], epoch);
+                sc_epoch_publish(&sc_coll.partial_epoch[bank], epoch);
             }
             sc_coll_wait_epoch(&sc_coll.result_epoch[bank], epoch, prog);
         }
