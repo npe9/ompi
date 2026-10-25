@@ -92,6 +92,80 @@ char **opal_environ_merge(char **minor, char **major)
  * Portable version of setenv(), allowing editing of any environ-like
  * array
  */
+/* See opal_environ.h. The owned array has spare capacity: an add writes the new
+ * terminator first, then publishes the entry (release), so a reader walking the array
+ * sees the old end or the new entry, never a hole. A full array, or one glibc has
+ * replaced (a later setenv(3) reallocs its own last array, not ours), is copied into a
+ * bigger owned array that is published with one pointer store; the old one is leaked,
+ * as are replaced strings (glibc leaks those too). Writers serialise on a spinlock. */
+static char **lithe_env_owned = NULL;
+static size_t lithe_env_cap = 0;
+static volatile int lithe_env_lock = 0;
+int opal_lithe_environ_set(const char *name, const char *value, int overwrite)
+{
+    static int on = -1;
+    size_t nl, n, i;
+    char *s, **ep;
+
+    if (on < 0) {
+        const char *e = getenv("OPAL_LITHE_ENV_SAFE");
+        on = (NULL != e && '1' == e[0]) ? 1 : 0;
+    }
+    if (!on) {
+        return setenv(name, value, overwrite);
+    }
+    if (NULL == name || '\0' == name[0] || NULL != strchr(name, '=')) {
+        return -1;
+    }
+    nl = strlen(name);
+    while (__atomic_exchange_n(&lithe_env_lock, 1, __ATOMIC_ACQUIRE)) {
+        __asm__ __volatile__("pause" ::: "memory");
+    }
+    ep = environ;
+    for (n = 0; NULL != ep && NULL != ep[n]; ++n) {
+        if (0 == strncmp(ep[n], name, nl) && '=' == ep[n][nl]) {
+            break;
+        }
+    }
+    if (NULL != ep && NULL != ep[n] && !overwrite) {
+        __atomic_store_n(&lithe_env_lock, 0, __ATOMIC_RELEASE);
+        return 0;
+    }
+    s = malloc(nl + strlen(value) + 2);
+    if (NULL == s) {
+        __atomic_store_n(&lithe_env_lock, 0, __ATOMIC_RELEASE);
+        return -1;
+    }
+    sprintf(s, "%s=%s", name, value);
+    if (NULL != ep && NULL != ep[n]) {
+        __atomic_store_n(&ep[n], s, __ATOMIC_RELEASE); /* old string leaked */
+    } else {
+        /* n = current length */
+        if (ep != lithe_env_owned || n + 2 > lithe_env_cap) {
+            size_t cap = 2 * (n + 2) + 64;
+            char **na = malloc(cap * sizeof(char *));
+            if (NULL == na) {
+                free(s);
+                __atomic_store_n(&lithe_env_lock, 0, __ATOMIC_RELEASE);
+                return -1;
+            }
+            for (i = 0; i < n; ++i) {
+                na[i] = ep[i];
+            }
+            na[n] = s;
+            na[n + 1] = NULL;
+            lithe_env_owned = na;
+            lithe_env_cap = cap;
+            __atomic_store_n(&environ, na, __ATOMIC_RELEASE); /* old array leaked */
+        } else {
+            ep[n + 1] = NULL;
+            __atomic_store_n(&ep[n], s, __ATOMIC_RELEASE);
+        }
+    }
+    __atomic_store_n(&lithe_env_lock, 0, __ATOMIC_RELEASE);
+    return 0;
+}
+
 int opal_setenv(const char *name, const char *value, bool overwrite, char ***env)
 {
     int i;
@@ -129,7 +203,7 @@ int opal_setenv(const char *name, const char *value, bool overwrite, char ***env
            check the return code of opal_setenv() and notice that we
            returned an error if you passed in the real environ) */
 #if defined(HAVE_SETENV)
-        setenv(name, value, overwrite);
+        opal_lithe_environ_set(name, value, overwrite);
         /* setenv copies the value, so we can free it here */
         free(newvalue);
 #else

@@ -273,6 +273,26 @@ OMPI_DECLSPEC void ompi_rte_wait_for_debugger(void);
         }                                                                   \
     }while(0);
 
+#if HAVE_LITHE
+/* LITHE_OMPI_LAZY_WAIT_NOSPIN=1 (2026-10-24, default 0; .build_logs/despin/mpi/):
+ * the yield below made every init/finalize PMIx wait (fence, barrier) a yield loop --
+ * the waiter stays RUNNABLE and round-robins for harts (GAPS B56). With the gate, a
+ * Lithe-timed sleep with backoff (10 us doubling to 1 ms) instead: the setters are
+ * PMIx callbacks (`active = false`) that wake nothing, so this is the timed-poll
+ * fallback of DESPIN_RULES.md, but the hart is free meanwhile. Callers that cannot
+ * block cooperatively keep the yield. */
+OMPI_DECLSPEC void ompi_rte_lithe_lazy_wait_step(unsigned *n);
+#define OMPI_LAZY_WAIT_FOR_COMPLETION(flg)                                  \
+    do {                                                                    \
+        unsigned _ompi_lw = 0;                                              \
+        while ((flg)) {                                                     \
+            opal_progress();                                                \
+            if ((flg)) {                                                    \
+                ompi_rte_lithe_lazy_wait_step(&_ompi_lw);                   \
+            }                                                               \
+        }                                                                   \
+    }while(0);
+#else
 #define OMPI_LAZY_WAIT_FOR_COMPLETION(flg)                                  \
     do {                                                                    \
         while ((flg)) {                                                     \
@@ -283,6 +303,7 @@ OMPI_DECLSPEC void ompi_rte_wait_for_debugger(void);
             opal_thread_yield();                                            \
         }                                                                   \
     }while(0);
+#endif
 
 END_C_DECLS
 

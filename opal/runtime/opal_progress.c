@@ -327,6 +327,8 @@ int opal_progress_block(void)
     return 0;
 }
 
+int (*opal_progress_probe_wait_fn)(int op, int tok, unsigned us) = NULL;
+
 void opal_progress_set_sc_park_callback(opal_progress_sc_park_callback_t cb)
 {
     sc_park_callback = cb;

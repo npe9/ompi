@@ -107,21 +107,21 @@ static bool check_pmix_overlap(char *var, char *value)
         opal_asprintf(&tmp, "PMIX_MCA_pdl_%s", &var[3]);
         // set it, but don't overwrite if they already
         // have a value in our environment
-        setenv(tmp, value, false);
+        opal_lithe_environ_set(tmp, value, false);
         free(tmp);
         return true;
     } else if (0 == strncmp(var, "oob_", 4)) {
         opal_asprintf(&tmp, "PMIX_MCA_ptl_%s", &var[4]);
         // set it, but don't overwrite if they already
         // have a value in our environment
-        setenv(tmp, value, false);
+        opal_lithe_environ_set(tmp, value, false);
         free(tmp);
         return true;
     } else if (0 == strncmp(var, "hwloc_", 6)) {
         opal_asprintf(&tmp, "PMIX_MCA_%s", var);
         // set it, but don't overwrite if they already
         // have a value in our environment
-        setenv(tmp, value, false);
+        opal_lithe_environ_set(tmp, value, false);
         free(tmp);
         return true;
     } else if (0 == strncmp(var, "if_", 3)) {
@@ -129,7 +129,7 @@ static bool check_pmix_overlap(char *var, char *value)
         opal_asprintf(&tmp, "PMIX_MCA_pif_%s", &var[3]);
         // set it, but don't overwrite if they already
         // have a value in our environment
-        setenv(tmp, value, false);
+        opal_lithe_environ_set(tmp, value, false);
         free(tmp);
         return true;
     }
@@ -182,7 +182,7 @@ static void translate_params(void)
                 opal_asprintf(&tmp, "PMIX_MCA_%s", &e2[len]);
                 // set it, but don't overwrite if they already
                 // have a value in our environment
-                setenv(tmp, evar, false);
+                opal_lithe_environ_set(tmp, evar, false);
                 free(tmp);
             }
             free(e2);
@@ -202,7 +202,7 @@ static void translate_params(void)
                 opal_asprintf(&tmp, "PMIX_MCA_%s", fv->mbvfv_var);
                 // set it, but don't overwrite if they already
                 // have a value in our environment
-                setenv(tmp, fv->mbvfv_value, false);
+                opal_lithe_environ_set(tmp, fv->mbvfv_value, false);
                 free(tmp);
             }
         }

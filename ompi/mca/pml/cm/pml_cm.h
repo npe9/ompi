@@ -38,6 +38,105 @@
 #include "pml_cm_recvreq.h"
 #include "pml_cm_sendreq.h"
 #include "ompi/message/message.h"
+#if HAVE_LITHE
+#include "opal/runtime/opal_progress.h"
+#include <lithe/lithe.h>
+#include <lithe/futex.h>
+#include <stdlib.h>
+#include <time.h>
+
+/* DE-SPIN of MPI_Probe / MPI_Mprobe (2026-10-24, .build_logs/despin/mpi/):
+ * LITHE_PML_CM_NOSPIN_PROBE=1 (default 0). The loop below was `while (!matched)
+ * { iprobe; opal_progress(); }`: a pure poll that holds the hart until a PEER posts
+ * the message, also when that peer is a co-resident context without a hart. With the
+ * gate: LITHE_PML_CM_PROBE_SPIN misses (default 256), then sleep -- on the hosted
+ * same-OS short-circuit's per-slot futex word, which a same-OS sender bumps and wakes
+ * (opal_progress_probe_wait_fn), for at most a backed-off timeout (20 us doubling to
+ * LITHE_PML_CM_PROBE_MAX_US, default 1000) that covers OFI arrivals, which wake
+ * nothing (no CQ entry exists for an unexpected message, so there is no fd to park
+ * on). Without the hook, the timed sleep alone (still a poll, but the hart is free).
+ * Contexts that cannot block cooperatively keep the old loop.
+ * A/B (login, .build_logs/despin/mpi/res_p2p.txt, res_tprobe*.txt; 2000 ping-pong
+ * probes, 3 harts): with 8 contexts on 3 harts the old poll has catastrophic tails --
+ * probe 8 B 1.29 us/op median but 531, 1781, 5439, 216 us/op in 4 of 18 runs, mprobe
+ * with 50 us of receiver work up to 367 us/op (vs 51 median) -- the probers hold the
+ * harts the senders need. Spin 16 removed the tails but cost the median 4x when harts
+ * are spare (probe 0.84 -> 3.4 us, futex sleep+wake on every probe); spin 256 keeps the
+ * median (0.80 vs 0.875) and bounds the tail (worst 4.9 vs 216 us/op). Default still 0
+ * pending the reruns quoted at the gate's flip. */
+static inline int mca_pml_cm_nospin_probe(void)
+{
+    static int cached = -1;
+    if (OPAL_UNLIKELY(cached < 0)) {
+        const char *e = getenv("LITHE_PML_CM_NOSPIN_PROBE");
+        cached = (e && '1' == e[0]) ? 1 : 0;
+    }
+    return cached;
+}
+static inline unsigned mca_pml_cm_probe_knob(int which)
+{
+    static int spin = -1, maxus = -1;
+    if (OPAL_UNLIKELY(spin < 0)) {
+        const char *e = getenv("LITHE_PML_CM_PROBE_SPIN");
+        int v = (e && *e) ? atoi(e) : 256;
+        const char *m = getenv("LITHE_PML_CM_PROBE_MAX_US");
+        int w = (m && *m) ? atoi(m) : 1000;
+        maxus = w > 0 ? w : 1000;
+        spin = v > 0 ? v : 1;
+    }
+    return (unsigned) (which ? maxus : spin);
+}
+/* One step of the blocking-probe wait after a miss; state lives in the caller. */
+static inline void mca_pml_cm_probe_wait_step(unsigned *miss, int *armed, int tok,
+                                              unsigned *us)
+{
+    int (*pw)(int, int, unsigned) = opal_progress_probe_wait_fn;
+    if (++*miss < mca_pml_cm_probe_knob(0)) {
+        return;
+    }
+    if (!*armed) {
+        *armed = 1;
+        if (NULL != pw) {
+            pw(0, 0, 0); /* count as prober, then re-probe after a fresh snapshot */
+        }
+        return;
+    }
+    *us = *us ? *us * 2 : 20;
+    if (*us > mca_pml_cm_probe_knob(1)) {
+        *us = mca_pml_cm_probe_knob(1);
+    }
+    if (NULL != pw) {
+        pw(2, tok, *us);
+    } else {
+        int z = 0;
+        struct timespec rel = {(time_t) (*us / 1000000u), (long) (*us % 1000000u) * 1000L};
+        (void) futex_wait_timeout(&z, 0, &rel);
+    }
+}
+#define MCA_PML_CM_PROBE_STATE                                          \
+    const int _pns = mca_pml_cm_nospin_probe() && lithe_can_block();     \
+    unsigned _pmiss = 0, _pus = 0;                                      \
+    int _parmed = 0, _ptok = 0
+#define MCA_PML_CM_PROBE_SNAPSHOT                                       \
+    do {                                                                \
+        if (_parmed && NULL != opal_progress_probe_wait_fn)             \
+            _ptok = opal_progress_probe_wait_fn(1, 0, 0);               \
+    } while (0)
+#define MCA_PML_CM_PROBE_MISS                                           \
+    do {                                                                \
+        if (_pns) mca_pml_cm_probe_wait_step(&_pmiss, &_parmed, _ptok, &_pus); \
+    } while (0)
+#define MCA_PML_CM_PROBE_DONE                                           \
+    do {                                                                \
+        if (_parmed && NULL != opal_progress_probe_wait_fn)             \
+            opal_progress_probe_wait_fn(3, 0, 0);                       \
+    } while (0)
+#else
+#define MCA_PML_CM_PROBE_STATE int _pns_unused = 0
+#define MCA_PML_CM_PROBE_SNAPSHOT do { } while (0)
+#define MCA_PML_CM_PROBE_MISS do { (void) _pns_unused; } while (0)
+#define MCA_PML_CM_PROBE_DONE do { } while (0)
+#endif
 
 
 BEGIN_C_DECLS
@@ -416,15 +515,19 @@ mca_pml_cm_probe(int src, int tag,
                   ompi_status_public_t * status)
 {
     int ret, matched = 0;
+    MCA_PML_CM_PROBE_STATE;
 
     while (true) {
+        MCA_PML_CM_PROBE_SNAPSHOT;
         ret = OMPI_MTL_CALL(iprobe(ompi_mtl,
                                    comm, src, tag,
                                    &matched, status));
         if (OMPI_SUCCESS != ret) break;
         if (matched) break;
         opal_progress();
+        MCA_PML_CM_PROBE_MISS;
     }
+    MCA_PML_CM_PROBE_DONE;
 
     return ret;
 }
@@ -451,8 +554,10 @@ mca_pml_cm_mprobe(int src,
                   ompi_status_public_t* status)
 {
     int ret, matched = 0;
+    MCA_PML_CM_PROBE_STATE;
 
     while (true) {
+        MCA_PML_CM_PROBE_SNAPSHOT;
         ret = OMPI_MTL_CALL(improbe(ompi_mtl,
                                     comm, src, tag,
                                     &matched, message,
@@ -460,7 +565,9 @@ mca_pml_cm_mprobe(int src,
         if (OMPI_SUCCESS != ret) break;
         if (matched) break;
         opal_progress();
+        MCA_PML_CM_PROBE_MISS;
     }
+    MCA_PML_CM_PROBE_DONE;
 
     return ret;
 }

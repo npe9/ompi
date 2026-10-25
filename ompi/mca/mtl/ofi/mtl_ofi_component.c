@@ -18,6 +18,7 @@
 #include "opal_config.h"
 #include "mtl_ofi.h"
 #include "opal/util/argv.h"
+#include "opal/util/opal_environ.h"
 #include "opal/util/printf.h"
 #include "opal/mca/common/ofi/common_ofi.h"
 #include "opal/util/proc.h"
@@ -857,6 +858,15 @@ ompi_mtl_ofi_component_init(bool enable_progress_threads,
            sizeof(ompi_mtl_ofi.hosted_cqd_slot_bitpos));
     memset(ompi_mtl_ofi.hosted_cqd_cid_bitpos, 0,
            sizeof(ompi_mtl_ofi.hosted_cqd_cid_bitpos));
+    /* OPAL_LITHE_ENV_SAFE (opal_environ.h): the cxi provider's first fi_getinfo
+     * (fi_cxi_ini -> cxip_env_init) adds these two names with two back-to-back
+     * glibc setenv(3) calls, the second of which reallocs and frees the environ array
+     * the first published, under concurrent getenv readers. Add them here first
+     * through the never-free path with the provider's own default ("1", honouring a
+     * value already set), so the provider's setenv(..., 0) finds them and adds
+     * nothing. A no-op when the gate is off. */
+    (void) opal_lithe_environ_set("FI_HMEM_ROCR_USE_DMABUF", "1", 0);
+    (void) opal_lithe_environ_set("FI_HMEM_CUDA_USE_DMABUF", "1", 0);
 #endif
 
     if (NULL != *opal_common_ofi.prov_include) {

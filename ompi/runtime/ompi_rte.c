@@ -41,6 +41,7 @@
 #endif  /* HAVE_PWD_H */
 
 #include "opal/util/argv.h"
+#include "opal/util/opal_environ.h"
 #include "opal/util/error.h"
 #include "opal/util/opal_getcwd.h"
 #include "opal/util/os_path.h"
@@ -123,10 +124,10 @@ static void ompi_lithe_topo_cache_prepare(void)
     snprintf(path, sizeof(path), "/dev/shm/ompi-lithe-topo-%u-%s-%016llx.xml",
              (unsigned) getuid(), boot, h);
     if (0 == access(path, R_OK)) {
-        setenv("HWLOC_XMLFILE", path, 0);
-        setenv("HWLOC_THISSYSTEM", "1", 0);
+        opal_lithe_environ_set("HWLOC_XMLFILE", path, 0);
+        opal_lithe_environ_set("HWLOC_THISSYSTEM", "1", 0);
     } else {
-        setenv("OMPI_LITHE_TOPO_CACHE_WRITE", path, 1);
+        opal_lithe_environ_set("OMPI_LITHE_TOPO_CACHE_WRITE", path, 1);
     }
 }
 
@@ -774,7 +775,7 @@ int ompi_rte_init(int *pargc, char ***pargv)
         OPAL_PROC_MY_NAME.vpid = logical_vpid;
         opal_process_info.my_local_rank *= lithe_ranks_per_host;
         opal_process_info.my_node_rank *= lithe_ranks_per_host;
-        setenv("OMPI_LITHE_CONTEXT_LOCAL_PROC", "1", 0);
+        opal_lithe_environ_set("OMPI_LITHE_CONTEXT_LOCAL_PROC", "1", 0);
         ompi_rte_lithe_hosted_multicontext_active = 1;
     }
 
@@ -1316,3 +1317,31 @@ static int _setup_proc_session_dir(char **sdir)
 
     return OPAL_SUCCESS;
 }
+
+#if HAVE_LITHE
+#include <lithe/lithe.h>
+#include <lithe/futex.h>
+#include <stdlib.h>
+#include <time.h>
+/* See OMPI_LAZY_WAIT_FOR_COMPLETION in ompi_rte.h. */
+void ompi_rte_lithe_lazy_wait_step(unsigned *n)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("LITHE_OMPI_LAZY_WAIT_NOSPIN");
+        on = (NULL != e && '1' == e[0]) ? 1 : 0;
+    }
+    if (!on || !lithe_can_block()) {
+        opal_thread_yield();
+        return;
+    }
+    {
+        unsigned k = *n < 7 ? *n : 7;
+        long us = 10L << k; /* 10 us .. 1.28 ms */
+        int z = 0;
+        struct timespec rel = {0, (us > 1000 ? 1000 : us) * 1000L};
+        ++*n;
+        (void) futex_wait_timeout(&z, 0, &rel);
+    }
+}
+#endif

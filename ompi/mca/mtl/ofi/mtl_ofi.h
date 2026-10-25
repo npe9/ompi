@@ -1113,6 +1113,124 @@ ompi_mtl_ofi_progress_after_eagain(int ctxt_id)
 }
 
 #if HAVE_LITHE
+/* DE-SPIN of the MTL's own-context completion waits (2026-10-24,
+ * .build_logs/despin/mpi/, DESPIN_RULES.md). LITHE_MTL_OFI_NOSPIN=mask, default 0:
+ *   bit 0 (1): blocking-send completion, ompi_mtl_ofi_send_generic
+ *              (`while (completion_count) progress_after_eagain`).
+ *   bit 1 (2): exCID handshake, ompi_mtl_ofi_post_recv_excid_buffer(blocking)
+ *              (`while (c_index_state > EXCHANGED) progress_after_eagain`); this is also
+ *              the wait inside the send / isend handshake loops.
+ * Both waits poll ONLY their own context's CQ, and under multi-EP no other context
+ * blocks on that CQ lock, so the CQ gate never yields: a waiter held its hart until the
+ * remote match (rendezvous / Ssend ack / handshake reply) arrived, also when a
+ * co-resident peer that has to post that match sat RUNNABLE without a hart.
+ * Unlike the EAGAIN retry (MTL_OFI_RETRY_UNTIL_DONE_CTXT, rule 3: yielding there broke
+ * the halo because that loop is the queue's only drainer), here the operation is
+ * already posted and the completion is produced by the NIC on our CQ (peers drain
+ * their own CQs, and the multi-EP peer sweep that drains ours wakes CQ parkers through
+ * mtl_ofi_mc_wake_cq_waiters), so standing aside is safe.
+ * With the bit set: LITHE_MTL_OFI_NOSPIN_SPIN own-CQ polls (default 256), then
+ * fi_trywait (cxi: re-arms the EQ interrupts -- without it the wait fd may never fire,
+ * cxip_ep_trywait) and park on the CQ wait fd in the parlib reactor for at most
+ * LITHE_MTL_OFI_NOSPIN_PARK_MS (default 1 ms, a safety net, not a poll period).
+ * fi_trywait != FI_SUCCESS means events are ready: drain instead of parking. Callers
+ * that cannot block cooperatively (lithe_can_block()==0), and CQs without a wait fd,
+ * keep the old poll.
+ * NEGATIVE (2026-10-24, login, LITHE_MTL_OFI_HOSTED_SC=0 so same-OS sends take the cxi
+ * path; .build_logs/despin/mpi/res_p2p.txt, res_tsend.txt, n=5-6, 3 harts): neutral on
+ * 8 B send/ssend and 64 KiB ssend; WORSE on 64 KiB send with 50 us receiver work,
+ * 121 -> 147-158 us/op at spin 256 (parity at spin >= 4096, i.e. when it never parks),
+ * and with 8 contexts on 3 harts 64 KiB 141 -> 180-200 us/op at every spin budget. The
+ * park puts an EQ-interrupt + reactor wake on the critical path of the remote match;
+ * the harts it frees were not what the peers lacked. Keep default 0; the exCID bit is
+ * not reachable on a login singleton (MPI_Comm_create_from_group needs a PMIx server). */
+static inline int ompi_mtl_ofi_nospin_mask(void)
+{
+    static int cached = -1;
+    if (OPAL_UNLIKELY(cached < 0)) {
+        const char *e = getenv("LITHE_MTL_OFI_NOSPIN");
+        cached = (e && *e) ? atoi(e) : 0;
+    }
+    return cached;
+}
+
+static inline unsigned ompi_mtl_ofi_nospin_spin(void)
+{
+    static int cached = -1;
+    if (OPAL_UNLIKELY(cached < 0)) {
+        const char *e = getenv("LITHE_MTL_OFI_NOSPIN_SPIN");
+        cached = (e && *e) ? atoi(e) : 256;
+        if (cached < 0) cached = 0;
+    }
+    return (unsigned) cached;
+}
+
+static inline int ompi_mtl_ofi_nospin_park_ms(void)
+{
+    static int cached = -2;
+    if (OPAL_UNLIKELY(cached == -2)) {
+        const char *e = getenv("LITHE_MTL_OFI_NOSPIN_PARK_MS");
+        cached = (e && *e) ? atoi(e) : 1;
+        if (cached < -1) cached = 1;
+    }
+    return cached;
+}
+
+/* One park on ctxt_id's CQ wait fd. Returns 1 if it parked (or found events ready),
+ * 0 if this caller/CQ cannot park (caller keeps polling). */
+static inline int ompi_mtl_ofi_nospin_park(int ctxt_id)
+{
+    int fd = ompi_mtl_ofi.ofi_ctxt[ctxt_id].cq_wait_fd;
+    struct fid *f;
+    int tw;
+
+    if (fd < 0 || !ompi_mtl_ofi.progress_block_enabled || !lithe_can_block()) {
+        return 0;
+    }
+    f = &ompi_mtl_ofi.ofi_ctxt[ctxt_id].cq->fid;
+    mtl_ofi_cq_context_enter_multicontext(ctxt_id);
+    tw = fi_trywait(ompi_mtl_ofi.fabric, &f, 1);
+    mtl_ofi_cq_context_exit_multicontext(ctxt_id);
+    if (FI_SUCCESS != tw) {
+        return 1; /* -FI_EAGAIN: completions are ready, drain them */
+    }
+    (void) parlib_reactor_wait(fd, EPOLLIN | EPOLLERR | EPOLLHUP,
+                               ompi_mtl_ofi_nospin_park_ms());
+    return 1;
+}
+
+/* Wait while COND holds, progressing ctxt CTXT_ID; BIT selects the gate. */
+#define MTL_OFI_LITHE_WAIT_WHILE(COND, CTXT_ID, BIT)                         \
+    do {                                                                     \
+        const int _ns_on = (ompi_mtl_ofi_nospin_mask() & (BIT)) &&           \
+                           ompi_mtl_ofi_lithe_multicontext_active();          \
+        unsigned _ns_i = 0;                                                  \
+        while (COND) {                                                       \
+            ompi_mtl_ofi_progress_after_eagain(CTXT_ID);                     \
+            if (!_ns_on || !(COND)) {                                        \
+                continue;                                                    \
+            }                                                                \
+            if (++_ns_i < ompi_mtl_ofi_nospin_spin()) {                      \
+                cpu_relax();                                                 \
+                continue;                                                    \
+            }                                                                \
+            _ns_i = 0;                                                       \
+            if (!ompi_mtl_ofi_nospin_park(CTXT_ID) &&                        \
+                lithe_fork_join_current_runnable_count() > 0) {              \
+                lithe_context_yield(); /* cannot park: old poll + donate */  \
+            }                                                                \
+        }                                                                    \
+    } while (0)
+#else
+#define MTL_OFI_LITHE_WAIT_WHILE(COND, CTXT_ID, BIT)                         \
+    do {                                                                     \
+        while (COND) {                                                       \
+            ompi_mtl_ofi_progress_after_eagain(CTXT_ID);                     \
+        }                                                                    \
+    } while (0)
+#endif
+
+#if HAVE_LITHE
 /* LITHE_MTL_OFI_EAGAIN_SWEEP=1: on a stalled EAGAIN retry, also trylock-drain the
  * peer ctxt CQs, the way outer ompi_mtl_ofi_progress does.
  *
@@ -1643,9 +1761,10 @@ ompi_mtl_ofi_post_recv_excid_buffer(bool blocking, struct ompi_communicator_t *c
 
     if (blocking) {
         assert(src != -1);
-        while (mtl_comm->c_index_vec[src].c_index_state > MCA_MTL_OFI_CID_EXCHANGED) {
-            ompi_mtl_ofi_progress_after_eagain(ctxt_id);
-        }
+        /* LITHE_MTL_OFI_NOSPIN bit 1 (see MTL_OFI_LITHE_WAIT_WHILE). */
+        MTL_OFI_LITHE_WAIT_WHILE(
+            mtl_comm->c_index_vec[src].c_index_state > MCA_MTL_OFI_CID_EXCHANGED,
+            ctxt_id, 2);
     }
 
     return OMPI_SUCCESS;
@@ -2015,10 +2134,10 @@ ompi_mtl_ofi_send_generic(struct mca_mtl_base_module_t *mtl,
     /**
      * Wait until the request is completed.
      * ompi_mtl_ofi_send_callback() updates this variable.
+     * LITHE_MTL_OFI_NOSPIN bit 0: park on the CQ fd instead of polling it for the
+     * whole remote match (see MTL_OFI_LITHE_WAIT_WHILE).
      */
-    while (0 < ofi_req.completion_count) {
-        ompi_mtl_ofi_progress_after_eagain(ctxt_id);
-    }
+    MTL_OFI_LITHE_WAIT_WHILE(0 < ofi_req.completion_count, ctxt_id, 1);
 
 free_request_buffer:
     ompi_mtl_ofi_deregister_and_free_buffer(&ofi_req);
@@ -2616,6 +2735,31 @@ ompi_mtl_ofi_imrecv(struct mca_mtl_base_module_t *mtl,
     uint64_t msgflags = FI_CLAIM | FI_COMPLETION;
     struct ompi_communicator_t *comm = (*message)->comm;
 
+#if HAVE_LITHE
+    if (OMPI_MTL_OFI_PROBE == ofi_req->type && 2 == ofi_req->match_state) {
+        /* Same-OS message claimed by improbe (ompi_mtl_ofi_hosted_sc_iprobe). */
+        ompi_mtl_ofi_request_t *rreq = (ompi_mtl_ofi_request_t *) mtl_request;
+        ompi_ret = ompi_mtl_datatype_recv_buf(convertor, &start, &length, &free_after);
+        if (OPAL_UNLIKELY(OMPI_SUCCESS != ompi_ret)) {
+            return ompi_ret;
+        }
+        ompi_mtl_ofi_set_mr_null(rreq);
+        rreq->type = OMPI_MTL_OFI_RECV;
+        rreq->event_callback = ompi_mtl_ofi_recv_callback;
+        rreq->error_callback = ompi_mtl_ofi_recv_error_callback;
+        rreq->comm = comm;
+        rreq->buffer = (free_after) ? start : NULL;
+        rreq->length = length;
+        rreq->convertor = convertor;
+        rreq->req_started = false;
+        rreq->status.MPI_ERROR = OMPI_SUCCESS;
+        ompi_mtl_ofi_hosted_sc_mrecv(ofi_req->parent, rreq, start);
+        free(ofi_req);
+        *message = MPI_MESSAGE_NULL;
+        return OMPI_SUCCESS;
+    }
+#endif
+
     ompi_mtl_ofi_set_mr_null(ofi_req);
 
     ctxt_id = ompi_mtl_ofi_ctxt_index_for_comm(comm);
@@ -2749,6 +2893,15 @@ ompi_mtl_ofi_iprobe_generic(struct mca_mtl_base_module_t *mtl,
     ctxt_id = ompi_mtl_ofi_ctxt_index_for_comm(comm);
     set_thread_context(ctxt_id);
 
+#if HAVE_LITHE
+    /* Same-OS messages live in the short-circuit's unexpected queue, never in OFI
+     * (see ompi_mtl_ofi_hosted_sc_iprobe: MPI_Probe hung forever without this). */
+    if (ompi_mtl_ofi_hosted_sc_enabled() &&
+        ompi_mtl_ofi_hosted_sc_iprobe(comm, src, tag, 0, flag, status, NULL)) {
+        return OMPI_SUCCESS;
+    }
+#endif
+
     if (ofi_cq_data) {
      /* If the source is known, use its peer_fiaddr. */
         if (MPI_ANY_SOURCE != src) {
@@ -2859,6 +3012,36 @@ ompi_mtl_ofi_improbe_generic(struct mca_mtl_base_module_t *mtl,
     if (NULL == ofi_req) {
         return OMPI_ERROR;
     }
+
+#if HAVE_LITHE
+    /* Same-OS: claim the short-circuit UE; imrecv delivers it (match_state 2). */
+    if (ompi_mtl_ofi_hosted_sc_enabled()) {
+        void *claimed = NULL;
+        if (ompi_mtl_ofi_hosted_sc_iprobe(comm, src, tag, 1, matched, &ofi_req->status,
+                                          &claimed)) {
+            if (1 != *matched) {
+                free(ofi_req);
+                *message = MPI_MESSAGE_NULL;
+                return OMPI_SUCCESS;
+            }
+            if (MPI_STATUS_IGNORE != status) {
+                OMPI_COPY_STATUS(status, ofi_req->status, false);
+            }
+            ofi_req->type = OMPI_MTL_OFI_PROBE;
+            ofi_req->match_state = 2;
+            ofi_req->parent = (struct ompi_mtl_ofi_request_t *) claimed;
+            (*message) = ompi_message_alloc();
+            if (NULL == (*message)) {
+                return OMPI_ERR_OUT_OF_RESOURCE;
+            }
+            (*message)->comm = comm;
+            (*message)->req_ptr = ofi_req;
+            (*message)->peer = ofi_req->status.MPI_SOURCE;
+            (*message)->count = ofi_req->status._ucount;
+            return OMPI_SUCCESS;
+        }
+    }
+#endif
 
     /**
      * If the source is known, use its peer_fiaddr.

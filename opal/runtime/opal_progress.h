@@ -183,6 +183,11 @@ typedef int (*opal_progress_sc_park_callback_t)(void);
 OPAL_DECLSPEC void opal_progress_set_sc_park_callback(opal_progress_sc_park_callback_t cb);
 OPAL_DECLSPEC int opal_progress_sc_park(void);
 
+/* Blocking-probe sleep hook (2026-10-24, LITHE_PML_CM_NOSPIN_PROBE; NULL = none):
+ * op 0 arm, 1 snapshot -> token, 2 wait(token, timeout_us), 3 disarm. Installed by
+ * the hosted mtl/ofi same-OS short-circuit, used by pml/cm's MPI_Probe/Mprobe. */
+OPAL_DECLSPEC extern int (*opal_progress_probe_wait_fn)(int op, int tok, unsigned us);
+
 #if OPAL_ENABLE_DEBUG
 OPAL_DECLSPEC extern bool opal_progress_debug;
 #endif

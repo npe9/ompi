@@ -107,6 +107,14 @@ OPAL_DECLSPEC char **opal_environ_merge(char **minor,
  *   opal_setenv("foo", "bar", true, &my_env);
  * \endcode
  */
+/* Hosted Lithe (2026-10-24, OPAL_LITHE_ENV_SAFE=1, default 0): setenv(3) on the process
+ * environ that never frees an array or string a concurrent getenv may be reading.
+ * glibc's setenv reallocs (frees) `environ` on every new name; in a hosted process the
+ * PMIx progress context, parlib's helper threads and other rank contexts getenv while
+ * MPI_Init / OpenMP init add names (GAPS: hosted miniFE omp segfaults in getenv, 2/300).
+ * With the gate off this is setenv(). Same return convention as setenv. */
+OPAL_DECLSPEC int opal_lithe_environ_set(const char *name, const char *value, int overwrite);
+
 OPAL_DECLSPEC int opal_setenv(const char *name, const char *value, bool overwrite, char ***env)
     __opal_attribute_nonnull__(1);
 

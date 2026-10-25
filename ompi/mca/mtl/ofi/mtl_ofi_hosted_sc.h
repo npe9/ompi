@@ -79,6 +79,15 @@ int ompi_mtl_ofi_hosted_sc_cancel_recv(ompi_mtl_ofi_request_t *ofi_req);
  */
 int ompi_mtl_ofi_hosted_sc_try_park_pending(void);
 
+/* MPI_Probe / Mprobe on same-OS messages (2026-10-24, .build_logs/despin/mpi/):
+ * returns 1 if SC decided (*flag set), 0 if the caller must ask OFI. claim=1
+ * removes the matched UE and returns it in *claimed (for imrecv). */
+int ompi_mtl_ofi_hosted_sc_iprobe(struct ompi_communicator_t *comm, int src, int tag,
+                                  int claim, int *flag, ompi_status_public_t *status,
+                                  void **claimed);
+void ompi_mtl_ofi_hosted_sc_mrecv(void *claimed, ompi_mtl_ofi_request_t *rreq,
+                                  void *start);
+
 END_C_DECLS
 
 #endif /* HAVE_LITHE */

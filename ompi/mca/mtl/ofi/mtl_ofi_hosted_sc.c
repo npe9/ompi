@@ -29,6 +29,9 @@
 
 #include <lithe/fork_join_sched.h>
 #include <lithe/lithe.h>
+#include <lithe/futex.h>
+#include <lithe/sched_trace.h>
+#include <time.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -85,6 +88,11 @@ typedef struct {
     opal_list_t pulls;
     opal_atomic_int32_t npull;
     volatile int32_t spinning;
+    /* LITHE_PML_CM_NOSPIN_PROBE: blocked MPI_Probe / Mprobe of THIS slot's rank
+     * sleep on probe_seq (a Lithe futex word); a sender that appends to
+     * `unexpected` bumps it and wakes them when probe_waiters != 0. */
+    volatile int32_t probe_seq;
+    opal_atomic_int32_t probe_waiters;
 } ompi_mtl_ofi_hosted_sc_slot_t;
 
 /* LITHE_SC_SPINLOCK (2026-10-21, default ON, =0 restores the opal_mutex, a Lithe MCS
@@ -284,6 +292,23 @@ static int sc_multi_os_world(void)
     return (opal_process_info.num_procs > opal_lithe_env_cache_rph()) ? 1 : 0;
 }
 
+/* LITHE_PML_CM_NOSPIN_PROBE (default 0): wake blocked probers of `slot` after a
+ * sender appended to its unexpected list. Call WITHOUT the slot lock held (it
+ * unblocks contexts). One load when the gate is off or nobody probes. */
+static int sc_probe_wake = 0;
+static int sc_probe_op(int op, int tok, unsigned us);
+static inline void sc_probe_poke(ompi_mtl_ofi_hosted_sc_slot_t *slot)
+{
+    if (OPAL_LIKELY(!sc_probe_wake)) {
+        return;
+    }
+    opal_atomic_mb(); /* the append before, the waiter count after (Dekker) */
+    if (0 != slot->probe_waiters) {
+        opal_atomic_add_fetch_32((opal_atomic_int32_t *) &slot->probe_seq, 1);
+        (void) futex_wake_all((int *) &slot->probe_seq);
+    }
+}
+
 static int sc_tag_match(int posted_tag, int msg_tag)
 {
     /* MPI_ANY_TAG matches user and collective (negative) tags. */
@@ -387,17 +412,16 @@ static lithe_context_t *sc_release_ssend(ompi_mtl_ofi_hosted_sc_ue_t *ue)
     return w;
 }
 
-/* LITHE_SC_PULL: copy every queued large message into its matched receive. Runs in
- * the receiving context (own slot only), from MTL progress and when it stops
- * spinning. */
-int ompi_mtl_ofi_hosted_sc_pull_progress(void)
+/* LITHE_SC_PULL: copy every queued large message of SLOT into its matched receive.
+ * Whoever takes the list under the slot lock owns the copies: the receiving context
+ * (own slot, from MTL progress and when it stops spinning) or the progress context
+ * (any slot, LITHE_SC_PROGRESS). */
+static int sc_pull_slot(ompi_mtl_ofi_hosted_sc_slot_t *slot)
 {
-    ompi_mtl_ofi_hosted_sc_slot_t *slot;
     ompi_mtl_ofi_hosted_sc_ue_t *ue;
     opal_list_t mine;
     int n = 0;
 
-    slot = sc_slot_for_vpid(opal_proc_local_get()->proc_name.vpid);
     if (NULL == slot || 0 == slot->npull) {
         return 0;
     }
@@ -426,6 +450,141 @@ int ompi_mtl_ofi_hosted_sc_pull_progress(void)
     }
     OBJ_DESTRUCT(&mine);
     return n;
+}
+
+static long sc_prog_nrecv_pull; /* copies taken by receivers (pull or queued) */
+
+int ompi_mtl_ofi_hosted_sc_pull_progress(void)
+{
+    int got = sc_pull_slot(sc_slot_for_vpid(opal_proc_local_get()->proc_name.vpid));
+    if (got > 0) {
+        __atomic_add_fetch(&sc_prog_nrecv_pull, got, __ATOMIC_RELAXED);
+    }
+    return got;
+}
+
+/* LITHE_SC_PROGRESS=N (2026-10-24, .build_logs/progress/, default 0 = off): a Lithe
+ * progress context for the same-OS path. Without it every large copy runs inside an MPI
+ * call of one of the two ranks -- the sender's Isend (receive already posted) or the
+ * receiver's Irecv (rendezvous message already queued) -- so Isend/Irecv + compute +
+ * Wait never overlaps: 1 MiB with 200 us of compute on 2 ranks / 3 harts measured
+ * comm 46-61 us, both 241-248 us, overlap 0.14-0.21. With the gate, an Isend or Irecv
+ * of >= N bytes that would copy queues the copy on the receiver's slot instead (the
+ * LITHE_SC_PULL list) and kicks the progress context. The copy is claimable: the
+ * progress context takes it on a spare hart while both ranks compute, or the receiver
+ * takes it in its own wait (MTL progress drains its slot), whichever locks the list
+ * first. No spare hart costs nothing extra: the context stays runnable and the
+ * receiver's wait does the copy, as before. The context blocks on a Lithe futex word
+ * when no copies are queued; a queuer wakes it only if it sleeps.
+ * MEASURED (.build_logs/progress/sweep1.txt, overlap.cpp: pack the whole send buffer,
+ * unpack + check the whole receive buffer; 2 ranks / 3 harts, n=3 interleaved, us/iter):
+ *   <= 1 MiB: neutral to LOSS (1 MiB 2000 us work 2073-2077 -> 2090-2102). The copy on a
+ *     third core drags both buffers into its cache; the next pack/unpack pays it back
+ *     (50 -> 65-108 us at 1 MiB). It is not wake latency: Perfetto shows the context on
+ *     the spare hart, woken in ~10 us, ~22 us per copy.
+ *   4 MiB: 2749 -> 2459 (2000 us work), 925-964 -> 856-871 (200 us); overlap 0 -> 0.39.
+ *   16 MiB, 2000 us work: 4710 -> 3594 (overlap 0.02 -> 0.58; 1 of 3 reps did not overlap).
+ *   No spare hart (4 ranks / 3 harts, 4 MiB): 5002-5046 -> 4892-4998, parity.
+ *   Hosted stress ALL CLEAN at N=4 MiB (4 contexts) and N=1 (8 contexts, every copy queued).
+ * Use N >= 4 MiB (beyond L2 the lines come from L3/DRAM anyway). Default stays 0 until
+ * miniFE and integration_check run with it. */
+static size_t sc_prog_min = 0;
+static int sc_prog_word = 0;        /* futex: bumped on every kick */
+static volatile int sc_prog_sleeping = 0;
+static volatile int sc_prog_stop = 0;
+static int sc_prog_done = 0;        /* futex: 1 once the loop has left */
+static int sc_prog_live = 0;
+
+static long sc_prog_nq, sc_prog_nself, sc_prog_nwake; /* LITHE_SC_PROGRESS_STATS */
+
+static void sc_prog_kick(void)
+{
+    __atomic_add_fetch(&sc_prog_word, 1, __ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&sc_prog_sleeping, __ATOMIC_SEQ_CST)) {
+        (void) futex_wake_one(&sc_prog_word);
+    }
+}
+
+static void sc_prog_main(void *arg)
+{
+    (void) arg;
+    lithe_sched_trace_label_self("mpi sc progress");
+    while (!sc_prog_stop) {
+        int seq = __atomic_load_n(&sc_prog_word, __ATOMIC_SEQ_CST);
+        if (0 != ompi_mtl_ofi_sc_npull_total) {
+            unsigned long i;
+            for (i = 0; i < sc_nslots; ++i) {
+                int got = sc_pull_slot(&sc_slots[i]);
+                if (got > 0) {
+                    __atomic_add_fetch(&sc_prog_nself, got, __ATOMIC_RELAXED);
+                }
+            }
+            continue;
+        }
+        /* Dekker with sc_prog_kick: publish sleeping, then re-check the count the
+         * queuer bumped before its kick; futex_wait also returns if seq moved. */
+        __atomic_store_n(&sc_prog_sleeping, 1, __ATOMIC_SEQ_CST);
+        if (0 == ompi_mtl_ofi_sc_npull_total && !sc_prog_stop) {
+            (void) futex_wait(&sc_prog_word, seq);
+            __atomic_add_fetch(&sc_prog_nwake, 1, __ATOMIC_RELAXED);
+        }
+        __atomic_store_n(&sc_prog_sleeping, 0, __ATOMIC_SEQ_CST);
+    }
+    __atomic_store_n(&sc_prog_done, 1, __ATOMIC_SEQ_CST);
+    (void) futex_wake_all(&sc_prog_done);
+}
+
+static void sc_prog_start(void)
+{
+    const char *e = getenv("LITHE_SC_PROGRESS");
+    long v = (NULL != e && *e) ? strtol(e, NULL, 10) : 0;
+
+    if (v <= 0 || !sc_pull) {
+        return;
+    }
+    sc_prog_min = (size_t) v;
+    sc_prog_stop = 0;
+    sc_prog_done = 0;
+    if (NULL == lithe_fork_join_context_create_progress(262144, sc_prog_main, NULL)) {
+        sc_prog_min = 0;
+        return;
+    }
+    sc_prog_live = 1;
+}
+
+/* Stop and wait for the loop to leave; the 256 KiB context is not reclaimed. */
+static void sc_prog_stop_wait(void)
+{
+    if (!sc_prog_live) {
+        return;
+    }
+    sc_prog_min = 0; /* no new queueing; the receivers drain what is left */
+    sc_prog_stop = 1;
+    sc_prog_kick();
+    (void) futex_wake_one(&sc_prog_word);
+    if (lithe_can_block()) {
+        while (0 == __atomic_load_n(&sc_prog_done, __ATOMIC_SEQ_CST)) {
+            (void) futex_wait(&sc_prog_done, 0);
+        }
+    }
+    sc_prog_live = 0;
+    if (NULL != getenv("LITHE_SC_PROGRESS_STATS")) {
+        fprintf(stderr, "[sc_progress] queued=%ld by_progress=%ld by_receiver=%ld wakes=%ld\n",
+                sc_prog_nq, sc_prog_nself, sc_prog_nrecv_pull, sc_prog_nwake);
+    }
+}
+
+/* Queue a matched large copy for the progress context or the receiver's wait. Called
+ * with slot locked; unlocks it. */
+static void sc_prog_queue_locked(ompi_mtl_ofi_hosted_sc_slot_t *slot,
+                                 ompi_mtl_ofi_hosted_sc_ue_t *ue)
+{
+    opal_list_append(&slot->pulls, &ue->super);
+    opal_atomic_add_fetch_32(&slot->npull, 1);
+    opal_atomic_add_fetch_32(&ompi_mtl_ofi_sc_npull_total, 1);
+    sc_unlock(slot);
+    __atomic_add_fetch(&sc_prog_nq, 1, __ATOMIC_RELAXED);
+    sc_prog_kick();
 }
 
 /* opal_lithe_wait_sync_spinning hook (base/wait_sync.c). */
@@ -513,6 +672,8 @@ int ompi_mtl_ofi_hosted_sc_init(void)
         OBJ_CONSTRUCT(&sc_slots[i].pulls, opal_list_t);
         sc_slots[i].npull = 0;
         sc_slots[i].spinning = 0;
+        sc_slots[i].probe_seq = 0;
+        sc_slots[i].probe_waiters = 0;
         OBJ_CONSTRUCT(&sc_slots[i].pr_free, opal_lifo_t);
         OBJ_CONSTRUCT(&sc_slots[i].ue_free, opal_lifo_t);
         opal_atomic_lock_init(&sc_slots[i].spin, OPAL_ATOMIC_LOCK_UNLOCKED);
@@ -552,9 +713,15 @@ int ompi_mtl_ofi_hosted_sc_init(void)
     }
     /* wait_sync scarce path: park on posted recv instead of yield→steal. */
     opal_progress_set_sc_park_callback(ompi_mtl_ofi_hosted_sc_try_park_pending);
+    e = getenv("LITHE_PML_CM_NOSPIN_PROBE");
+    sc_probe_wake = (NULL != e && '1' == e[0]);
+    if (sc_probe_wake) {
+        opal_progress_probe_wait_fn = sc_probe_op;
+    }
     if (sc_pull) {
         opal_lithe_wait_sync_spinning = sc_wait_spinning;
     }
+    sc_prog_start();
     opal_output_verbose(1, opal_common_ofi.output,
                         "mtl:ofi: hosted same-OS short-circuit enabled (slots=%lu multi_os=%d)",
                         rph, sc_multi_os_world());
@@ -565,6 +732,7 @@ void ompi_mtl_ofi_hosted_sc_finalize(void)
 {
     unsigned long i;
 
+    sc_prog_stop_wait();
     opal_progress_set_sc_park_callback(NULL);
     opal_lithe_wait_sync_spinning = NULL;
     if (NULL == sc_slots) {
@@ -737,6 +905,33 @@ int ompi_mtl_ofi_hosted_sc_try_send(struct ompi_communicator_t *comm, int dest,
         return 1;
     }
 
+    if (NULL != matched_recv && is_isend && !free_after && sc_prog_min > 0
+        && length >= sc_prog_min && dest != src_rank && !need_ofi_cancel
+        && NULL != (ue = sc_ue_get(slot))) {
+        /* LITHE_SC_PROGRESS: the receiver is not in a wait; leave the copy to the
+         * progress context (or to the receiver's wait, whichever claims it first). */
+        matched_recv->req_started = true;
+        ue->buf = start;
+        ue->len = length;
+        ue->tag = tag;
+        ue->src_rank = src_rank;
+        ue->cid = cid;
+        ue->is_sync = 1;
+        ue->borrowed = 1;
+        ue->send_is_isend = 1;
+        ue->send_req = ofi_req;
+        ue->send_waiter = NULL;
+        ue->rreq = matched_recv;
+        ue->rdst = matched_dst;
+        ofi_req->completion_count = 1;
+        ofi_req->status.MPI_ERROR = OMPI_SUCCESS;
+        sc_prog_queue_locked(slot, ue);
+        if (NULL != recv_waiter) {
+            lithe_context_unblock(recv_waiter);
+        }
+        return 1;
+    }
+
     if (NULL != matched_recv) {
         sc_unlock(slot);
         /* Cancel OFI before completion_callback (may free the request). */
@@ -798,6 +993,12 @@ int ompi_mtl_ofi_hosted_sc_try_send(struct ompi_communicator_t *comm, int dest,
         ue->send_req = ofi_req;
         opal_list_append(&slot->unexpected, &ue->super);
         if (!is_isend) {
+            if (OPAL_UNLIKELY(sc_probe_wake)) {
+                /* never unblock under the slot lock; the loop rechecks */
+                sc_unlock(slot);
+                sc_probe_poke(slot);
+                sc_lock(slot);
+            }
             /* Park until matching recv takes UE — not yield→empty steal. */
             while (ofi_req->completion_count > 0) {
                 parg.slot = slot;
@@ -813,14 +1014,155 @@ int ompi_mtl_ofi_hosted_sc_try_send(struct ompi_communicator_t *comm, int dest,
             }
         } else {
             sc_unlock(slot);
+            sc_probe_poke(slot);
         }
         return 1;
     }
 
     opal_list_append(&slot->unexpected, &ue->super);
     sc_unlock(slot);
+    sc_probe_poke(slot);
     sc_finish_send(ofi_req, is_isend, free_after, start);
     return 1;
+}
+
+/*
+ * MPI_Probe / Iprobe / Improbe on same-OS messages (2026-10-24).
+ *
+ * BUG FIXED HERE: the probe path only asked OFI (fi_trecvmsg FI_PEEK), but a same-OS
+ * send goes through the short-circuit and never reaches OFI, so in a single-OS hosted
+ * world MPI_Probe / MPI_Mprobe never matched and spun forever (p2p_despin probe /
+ * mprobe: 0/3 complete, timeout, with LITHE_MTL_OFI_HOSTED_SC=1, the default; SC=0
+ * passes probe at 39 us/op). Look at this slot's unexpected list first. Not gated:
+ * it is a correctness fix (the old path cannot complete).
+ *
+ * MPI_ANY_TAG matches only non-negative (user) tags here, as in ob1: an unexpected
+ * collective fragment must not satisfy a user probe.
+ */
+int ompi_mtl_ofi_hosted_sc_iprobe(struct ompi_communicator_t *comm, int src, int tag,
+                                  int claim, int *flag, ompi_status_public_t *status,
+                                  void **claimed)
+{
+    ompi_mtl_ofi_hosted_sc_slot_t *slot;
+    ompi_mtl_ofi_hosted_sc_ue_t *ue, *found = NULL;
+    int cid, any_remote = 0;
+
+    if (!sc_enabled) {
+        return 0;
+    }
+    if (MPI_ANY_SOURCE != src) {
+        if (!ompi_mtl_ofi_hosted_sc_same_os(ompi_comm_peer_lookup(comm, src))) {
+            return 0;
+        }
+    } else if (sc_multi_os_world()) {
+        any_remote = 1; /* no local match: OFI must still peek for remote peers */
+    }
+    slot = sc_slot_for_vpid(opal_proc_local_get()->proc_name.vpid);
+    if (NULL == slot) {
+        return 0;
+    }
+    cid = (int) comm->c_index;
+
+    sc_lock(slot);
+    OPAL_LIST_FOREACH (ue, &slot->unexpected, ompi_mtl_ofi_hosted_sc_ue_t) {
+        if (ue->cid != cid || !sc_src_match(src, ue->src_rank)) {
+            continue;
+        }
+        if (MPI_ANY_TAG == tag ? ue->tag < 0 : ue->tag != tag) {
+            continue;
+        }
+        found = ue;
+        break;
+    }
+    if (NULL != found) {
+        if (MPI_STATUS_IGNORE != status) {
+            status->MPI_SOURCE = found->src_rank;
+            status->MPI_TAG = found->tag;
+            status->MPI_ERROR = MPI_SUCCESS;
+            status->_ucount = found->len;
+            status->_cancelled = 0;
+        }
+        if (claim) {
+            opal_list_remove_item(&slot->unexpected, &found->super);
+            *claimed = found;
+        }
+    }
+    sc_unlock(slot);
+
+    if (NULL != found) {
+        *flag = 1;
+        return 1;
+    }
+    if (any_remote) {
+        return 0;
+    }
+    *flag = 0;
+    return 1;
+}
+
+/* MPI_Mrecv of a UE claimed by ompi_mtl_ofi_hosted_sc_iprobe(claim=1): the same
+ * delivery as try_irecv's unexpected match. rreq is set up like an irecv request. */
+void ompi_mtl_ofi_hosted_sc_mrecv(void *claimed, ompi_mtl_ofi_request_t *rreq,
+                                  void *start)
+{
+    ompi_mtl_ofi_hosted_sc_ue_t *ue = (ompi_mtl_ofi_hosted_sc_ue_t *) claimed;
+    ompi_mtl_ofi_hosted_sc_slot_t *slot =
+        sc_slot_for_vpid(opal_proc_local_get()->proc_name.vpid);
+    lithe_context_t *sw = NULL;
+
+    if (ue->is_sync && !ue->borrowed) {
+        sc_lock(slot);
+        sw = sc_release_ssend(ue);
+        sc_unlock(slot);
+    }
+    sc_finish_recv(rreq, start, ue->src_rank, ue->tag, ue->buf, ue->len);
+    if (ue->borrowed) {
+        /* The sender's buffer is free only after the copy above. */
+        sc_lock(slot);
+        sw = sc_release_ssend(ue);
+        sc_unlock(slot);
+    }
+    if (NULL != sw) {
+        lithe_context_unblock(sw);
+    }
+    sc_ue_put(slot, ue);
+}
+
+/* opal_progress_probe_wait_fn (pml/cm blocking probe, LITHE_PML_CM_NOSPIN_PROBE):
+ * op 0 arm (count this context as a prober of its slot), 1 snapshot (returns the
+ * sequence to wait on; take it BEFORE the iprobe that may miss), 2 wait (sleep on
+ * the snapshot for at most `us` microseconds: same-OS senders wake it at once, the
+ * timeout covers OFI arrivals, which wake nothing), 3 disarm. */
+static int sc_probe_op(int op, int tok, unsigned us)
+{
+    ompi_mtl_ofi_hosted_sc_slot_t *slot =
+        sc_slot_for_vpid(opal_proc_local_get()->proc_name.vpid);
+    struct timespec rel;
+
+    if (NULL == slot) {
+        if (2 == op) {
+            int z = 0;
+            rel.tv_sec = us / 1000000u;
+            rel.tv_nsec = (long) (us % 1000000u) * 1000L;
+            (void) futex_wait_timeout(&z, 0, &rel);
+        }
+        return 0;
+    }
+    switch (op) {
+    case 0:
+        opal_atomic_add_fetch_32(&slot->probe_waiters, 1); /* full barrier */
+        return 0;
+    case 1:
+        return slot->probe_seq;
+    case 2:
+        rel.tv_sec = us / 1000000u;
+        rel.tv_nsec = (long) (us % 1000000u) * 1000L;
+        (void) futex_wait_timeout((int *) &slot->probe_seq, tok, &rel);
+        return 0;
+    default:
+        opal_atomic_add_fetch_32(&slot->probe_waiters, -1);
+        return 0;
+    }
 }
 
 int ompi_mtl_ofi_hosted_sc_try_irecv(struct ompi_communicator_t *comm, int src,
@@ -871,6 +1213,16 @@ int ompi_mtl_ofi_hosted_sc_try_irecv(struct ompi_communicator_t *comm, int src,
         }
         opal_list_remove_item(&slot->unexpected, &ue->super);
         sc_trace(3, (int) opal_proc_local_get()->proc_name.vpid, ue->src_rank, ue->tag, cid, ofi_req);
+        if (ue->borrowed && sc_prog_min > 0 && ue->len >= sc_prog_min
+            && NULL == ofi_req->buffer) {
+            /* LITHE_SC_PROGRESS: the rendezvous copy goes to the progress context
+             * instead of this Irecv (see sc_prog_min). */
+            ofi_req->req_started = true;
+            ue->rreq = ofi_req;
+            ue->rdst = start;
+            sc_prog_queue_locked(slot, ue);
+            return 1;
+        }
         if (ue->is_sync && !ue->borrowed) {
             sw = sc_release_ssend(ue);
         }
