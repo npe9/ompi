@@ -1240,7 +1240,13 @@ int ompi_mtl_ofi_hosted_sc_try_send(struct ompi_communicator_t *comm, int dest,
         return 1;
     }
 
-    if (NULL != matched_recv && (is_isend ? !free_after : sc_dma_blocking) && dest != src_rank
+    /* A non-contiguous Isend (free_after: START is the packed bounce, ofi_req->buffer) may DMA
+     * too at >= LITHE_SC_DMA_NONCONTIG: the tx completion's sc_finish_send ->
+     * ompi_mtl_ofi_deregister_and_free_buffer frees the bounce once the NIC has read it. */
+    if (NULL != matched_recv
+        && (is_isend ? (!free_after || (sc_dma_noncontig > 0 && length >= sc_dma_noncontig))
+                     : sc_dma_blocking)
+        && dest != src_rank
         && !need_ofi_cancel && sc_dma_eligible(length, matched_recv, matched_dst)
         && NULL != (ue = sc_ue_get(slot))) {
         /* LITHE_SC_DMA: the NIC moves the bytes; an Isend returns at once, a blocking Send
