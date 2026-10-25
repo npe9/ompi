@@ -819,9 +819,22 @@ static int sc_dma_tx_err_cb(struct fi_cq_err_entry *e, ompi_mtl_ofi_request_t *r
     return OMPI_SUCCESS;
 }
 
+/* LITHE_SC_DMA_NONCONTIG=bytes (DEFAULT 4 MiB, 0 = off; 2026-10-25): a non-contiguous receive
+ * (rreq->buffer is the packed bounce, dst == that bounce) of at least this size also takes the
+ * NIC copy into the bounce; the unpack then runs in sc_finish_recv on the completion context.
+ * cxi iov_limit is 1, so the NIC cannot scatter into the datatype itself: this removes one of the
+ * two CPU copies, not both. A/B n=10 (.build_logs/progress/scdma/nc.txt, strided 4 KiB / 64 KiB
+ * blocks, 2 and 4 ranks on 3 harts): comm+compute 0.62-0.83x at 4 and 16 MiB, comm alone parity
+ * or better; at 1 MiB comm alone DOUBLES (107 -> 215 us: the deferred unpack costs a wake) for
+ * a 1-2 % overlap gain, hence the 4 MiB floor. */
+static size_t sc_dma_noncontig = 4194304;
+
 static int sc_dma_eligible(size_t len, ompi_mtl_ofi_request_t *rreq, void *dst)
 {
-    return sc_dma_min > 0 && len >= sc_dma_min && NULL != dst && NULL == rreq->buffer;
+    if (sc_dma_min == 0 || len < sc_dma_min || NULL == dst) {
+        return 0;
+    }
+    return NULL == rreq->buffer || (sc_dma_noncontig > 0 && len >= sc_dma_noncontig);
 }
 
 /* Issue the NIC copy for UE (ue->buf -> ue->rdst, matched, rreq started). Called with the
@@ -1021,6 +1034,10 @@ int ompi_mtl_ofi_hosted_sc_init(void)
     e = getenv("LITHE_SC_DMA");
     if (NULL != e) {
         sc_dma_min = atol(e) > 0 ? (size_t) atol(e) : 0;
+    }
+    e = getenv("LITHE_SC_DMA_NONCONTIG");
+    if (NULL != e) {
+        sc_dma_noncontig = atol(e) > 0 ? (size_t) atol(e) : 0;
     }
     e = getenv("LITHE_SC_DMA_BLOCKING");
     if (NULL != e) {
