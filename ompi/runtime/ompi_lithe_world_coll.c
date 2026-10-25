@@ -897,6 +897,19 @@ static int sc_barrier_yields = -1;
  * overlapping), plain budget 4 +9 %. Opt-in: the default barrier budget (1) loses
  * nowhere. */
 static int sc_barrier_smart = -1;
+/* LITHE_HOSTED_SC_BARRIER_IDLE_BLOCK=N (2026-10-25, DEFAULT 1024; 0 = spin forever): a single-OS waiter
+ * with NO runnable peer cpu_relax'ed forever, holding its hart. That is fine while every
+ * awaited rank is running, and a deadlock when one is blocked on something only the bottom
+ * delivers (a reactor timer, a NIC interrupt): with every hart spinning here, no hart ever
+ * idles into the reactor. LITHE_SC_DMA hit it (bigred 1 MiB, 8 ctx / 3 harts, 8/20 hung:
+ * all 3 harts in this loop, the 8th rank asleep on a 100 us timer that never fired). With
+ * N > 0, after N idle spins the waiter blocks (untimed Lithe futex on `arrived`; the last
+ * arrival wakes it) and its hart goes back down. Measured (.build_logs/progress/scdma/,
+ * n=10 interleaved, DMA off): hosted stress allreduce/halo/nbc at 4 and 8 contexts on 3 harts
+ * all within 0.98-1.01x (ib_cost.txt); bench/alt ranks K=8 (8 contexts / 4 harts) 9.20 ->
+ * 8.73 ms/iter median (ib_ranks.txt). With LITHE_SC_DMA=1: hangs 7/20 -> 0/20, and 0/30 only
+ * together with the DMA completion contexts (fix_ab*.txt). */
+static int sc_barrier_idle_block = -1;
 
 static void sc_coll_ticket_barrier(int size, int with_progress)
 {
@@ -909,13 +922,16 @@ static void sc_coll_ticket_barrier(int size, int with_progress)
         sc_barrier_yields = e ? atoi(e) : 1;
         e = getenv("LITHE_HOSTED_SC_BARRIER_SMART");
         sc_barrier_smart = (e && '1' == e[0]);
+        e = getenv("LITHE_HOSTED_SC_BARRIER_IDLE_BLOCK");
+        sc_barrier_idle_block = e ? atoi(e) : 1024;
     }
+    unsigned int idle_spins = 0;
 #endif
 
     ticket = opal_atomic_add_fetch_32(&sc_coll.arrived, 1);
     goal = ((ticket + (int32_t) size - 1) / (int32_t) size) * (int32_t) size;
 #if HAVE_LITHE
-    if (!with_progress && sc_barrier_yields > 0 && ticket == goal) {
+    if (!with_progress && (sc_barrier_yields > 0 || sc_barrier_idle_block > 0) && ticket == goal) {
         futex_wake_all((int *) &sc_coll.arrived); /* last arrival: release sleepers */
     }
 #endif
@@ -1006,6 +1022,10 @@ static void sc_coll_ticket_barrier(int size, int with_progress)
                     opal_atomic_add_fetch_32(&opal_lithe_wait_queued, -1);
                 }
             }
+        } else if (!with_progress && sc_barrier_idle_block > 0 &&
+                   ++idle_spins >= (unsigned int) sc_barrier_idle_block && lithe_can_block()) {
+            idle_spins = 0;
+            (void) futex_wait((int *) &sc_coll.arrived, (int) cur);
         } else {
             cpu_relax();
         }

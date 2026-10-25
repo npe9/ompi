@@ -587,6 +587,297 @@ static void sc_prog_queue_locked(ompi_mtl_ofi_hosted_sc_slot_t *slot,
     sc_prog_kick();
 }
 
+/* LITHE_SC_DMA=N (2026-10-25, .build_logs/progress/scdma/, DEFAULT 1048576; 0 = memcpy): move a matched
+ * same-OS copy of >= N bytes with the NIC instead of a core. Measured first
+ * (.build_logs/progress/ofiov/steps.txt, overlap.cpp, 2 ranks / 3 harts): the cxi path
+ * (LITHE_MTL_OFI_HOSTED_SC=0) already hides the whole transfer behind compute with no
+ * software progress -- wait 1449 -> 3 us at 16 MiB, 100 -> 2.7 us at 1 MiB, because cxi
+ * rendezvous is offloaded -- while SC copies inside the Irecv/Isend (post 1100 us at 16 MiB;
+ * 16 MiB with 2000 us work: 4514 us/iter on SC vs 3124 on cxi). SC cannot just hand large
+ * messages to OFI: a receive for a same-OS source is matched only in SC, and routing by size
+ * would break non-overtaking. So keep the match in SC and replace only the memcpy: the
+ * matching context posts fi_trecv(dst) and fi_tsend(src) to its own endpoint under a private
+ * tag (proto bits 11: ordinary receives never ignore the ACK bit, ssend-ack receives match
+ * exactly, so nothing else can take it). The receive's completion completes the MPI receive;
+ * the sender's buffer is released when both completions are in. Either completion can be
+ * drained by any context's CQ sweep. Contiguous receives only (no unpack); Isend with a
+ * posted receive (sender matches) and borrowed rendezvous UEs (receiver matches, blocking or
+ * nonblocking sender).
+ * MEASURED (sweep2.txt, overlap.cpp late, n=10 interleaved, threshold 1 MiB, 3 harts, median
+ * us/iter memcpy -> DMA): 2 ranks 1 MiB 274.5 -> 260.0 (200 us work), 2070 -> 2060 (2000);
+ * 4 MiB 902.5 -> 675.6, 2747 -> 2300; 16 MiB 2855 -> 2626, 4736 -> 3182. No spare hart (4
+ * ranks): 1 MiB 503 -> 461, 4070 -> 4028; 4 MiB 1501 -> 1058, 4999 -> 4194; 16 MiB 4542 ->
+ * 4154, 7768 -> 4865. 240/240 runs, every byte checked. Below 1 MiB it loses (sweep_r2.txt:
+ * 64 KiB +13..47 %, 256 KiB +5 % at 200 us work): the NIC round trip outweighs a cached copy.
+ * Needs the completion contexts below AND the SC barrier idle-block (ompi_lithe_world_coll.c,
+ * default on); either alone still hung bigred 1 MiB (fix_ab2.txt). */
+static size_t sc_dma_min = 1048576;
+static uint32_t sc_dma_seq;
+static long sc_dma_n, sc_dma_bytes; /* LITHE_SC_DMA_STATS */
+long ompi_mtl_ofi_sc_dma_rx_n, ompi_mtl_ofi_sc_dma_tx_n; /* completions (gdb-visible) */
+#define SC_DMA_PROTO (0x0000000300000000ULL)
+
+typedef struct {
+    ompi_mtl_ofi_request_t rx;
+    ompi_mtl_ofi_request_t tx;
+    ompi_mtl_ofi_hosted_sc_slot_t *slot;
+    ompi_mtl_ofi_hosted_sc_ue_t *ue;
+    int left;      /* completions outstanding (2) */
+    int ctxt;      /* endpoint both halves were posted on */
+} sc_dma_t;
+
+/* Completion contexts (one per endpoint with DMAs in flight). The waiters of a DMA'd
+ * request must not depend on anybody polling: the receiver sleeps in its direct wait and
+ * the other ranks may be blocked in a barrier. The first version had no such context and
+ * hung bigred 1 MiB, 8 ctx / 3 harts, 8/20 (.build_logs/progress/scdma/): one DMA's two
+ * completions sat in its CQ while every hart spun in the SC barrier and the receiver's
+ * 100 us timer never fired (nobody drove the reactor). Here the endpoint's context blocks
+ * on the CQ's interrupt fd in the parlib reactor (fi_trywait first: cxi re-arms its EQ
+ * interrupt there); the NIC finishing the copy fires the fd, the context drains the CQ,
+ * and the completion callback wakes the waiting rank. No poll period, no timer. */
+#define SC_DMA_MAX_CTXT 256
+static struct {
+    int inflight;            /* DMA pairs not yet fully completed on this endpoint */
+    int word;                /* futex: bumped when inflight goes 0 -> 1 */
+    volatile int sleeping;
+    int live;
+} sc_dma_ep[SC_DMA_MAX_CTXT];
+static volatile int sc_dma_stop;
+static int sc_dma_ctx_live; /* contexts still running (futex for finalize) */
+static long sc_dma_parks, sc_dma_drains; /* LITHE_SC_DMA_STATS */
+
+static void sc_dma_ep_main(void *arg)
+{
+    int c = (int) (intptr_t) arg;
+    int fd = ompi_mtl_ofi.ofi_ctxt[c].cq_wait_fd;
+
+    while (!sc_dma_stop) {
+        int seq = __atomic_load_n(&sc_dma_ep[c].word, __ATOMIC_SEQ_CST);
+        int got;
+
+        if (0 == __atomic_load_n(&sc_dma_ep[c].inflight, __ATOMIC_SEQ_CST)) {
+            __atomic_store_n(&sc_dma_ep[c].sleeping, 1, __ATOMIC_SEQ_CST);
+            if (0 == __atomic_load_n(&sc_dma_ep[c].inflight, __ATOMIC_SEQ_CST) && !sc_dma_stop) {
+                (void) futex_wait(&sc_dma_ep[c].word, seq);
+            }
+            __atomic_store_n(&sc_dma_ep[c].sleeping, 0, __ATOMIC_SEQ_CST);
+            continue;
+        }
+        mtl_ofi_cq_context_enter_multicontext(c);
+        got = ompi_mtl_ofi_context_progress(c);
+        mtl_ofi_cq_context_exit_multicontext(c);
+        mtl_ofi_mc_wake_cq_waiters(c, got);
+        if (got > 0) {
+            __atomic_add_fetch(&sc_dma_drains, 1, __ATOMIC_RELAXED);
+            continue;
+        }
+        if (fd < 0) {
+            lithe_context_yield(); /* no interrupt fd: degrade to a yielding poll */
+            continue;
+        }
+        {
+            struct fid *f = &ompi_mtl_ofi.ofi_ctxt[c].cq->fid;
+            int tw;
+            mtl_ofi_cq_context_enter_multicontext(c);
+            tw = fi_trywait(ompi_mtl_ofi.fabric, &f, 1);
+            mtl_ofi_cq_context_exit_multicontext(c);
+            if (FI_SUCCESS != tw) {
+                continue; /* completions already queued: drain */
+            }
+        }
+        __atomic_add_fetch(&sc_dma_parks, 1, __ATOMIC_RELAXED);
+        /* 10 ms is only a safety net against a lost interrupt, not a poll period. */
+        (void) parlib_reactor_wait(fd, EPOLLIN | EPOLLERR | EPOLLHUP, 10);
+    }
+    if (0 == __atomic_sub_fetch(&sc_dma_ctx_live, 1, __ATOMIC_SEQ_CST)) {
+        (void) futex_wake_all(&sc_dma_ctx_live);
+    }
+}
+
+/* Count a DMA in flight on endpoint C; start C's completion context on first use. */
+static int sc_dma_epctx = 1; /* LITHE_SC_DMA_EPCTX=0: no completion contexts (ablation) */
+static void sc_dma_ep_get(int c)
+{
+    if (sc_dma_epctx && __atomic_load_n(&sc_dma_ep[c].live, __ATOMIC_ACQUIRE) == 0) {
+        int z = 0;
+        if (__atomic_compare_exchange_n(&sc_dma_ep[c].live, &z, 1, false,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            __atomic_add_fetch(&sc_dma_ctx_live, 1, __ATOMIC_SEQ_CST);
+            if (NULL == lithe_fork_join_context_create_progress(
+                            262144, sc_dma_ep_main, (void *) (intptr_t) c)) {
+                opal_output(0, "mtl:ofi: LITHE_SC_DMA: cannot create the completion context");
+                abort();
+            }
+        }
+    }
+    if (1 == __atomic_add_fetch(&sc_dma_ep[c].inflight, 1, __ATOMIC_SEQ_CST)) {
+        __atomic_add_fetch(&sc_dma_ep[c].word, 1, __ATOMIC_SEQ_CST);
+        if (__atomic_load_n(&sc_dma_ep[c].sleeping, __ATOMIC_SEQ_CST)) {
+            (void) futex_wake_one(&sc_dma_ep[c].word);
+        }
+    }
+}
+
+static void sc_dma_stop_wait(void)
+{
+    int c;
+    if (0 == __atomic_load_n(&sc_dma_ctx_live, __ATOMIC_SEQ_CST)) {
+        return;
+    }
+    sc_dma_stop = 1;
+    for (c = 0; c < SC_DMA_MAX_CTXT; c++) {
+        if (sc_dma_ep[c].live) {
+            __atomic_add_fetch(&sc_dma_ep[c].word, 1, __ATOMIC_SEQ_CST);
+            (void) futex_wake_all(&sc_dma_ep[c].word);
+            if (ompi_mtl_ofi.ofi_ctxt[c].cq_wait_fd >= 0) {
+                (void) parlib_reactor_cancel_fd(ompi_mtl_ofi.ofi_ctxt[c].cq_wait_fd);
+            }
+        }
+    }
+    if (lithe_can_block()) {
+        int n;
+        while (0 != (n = __atomic_load_n(&sc_dma_ctx_live, __ATOMIC_SEQ_CST))) {
+            (void) futex_wait(&sc_dma_ctx_live, n);
+        }
+    }
+}
+
+static void sc_dma_put(sc_dma_t *d)
+{
+    if (0 == __atomic_sub_fetch(&d->left, 1, __ATOMIC_ACQ_REL)) {
+        __atomic_sub_fetch(&sc_dma_ep[d->ctxt].inflight, 1, __ATOMIC_SEQ_CST);
+        sc_ue_put(d->slot, d->ue);
+        free(d);
+    }
+}
+
+static void sc_dma_rx_done(sc_dma_t *d, int err)
+{
+    ompi_mtl_ofi_hosted_sc_ue_t *ue = d->ue;
+    ompi_mtl_ofi_request_t *rreq = ue->rreq;
+
+    __atomic_add_fetch(&ompi_mtl_ofi_sc_dma_rx_n, 1, __ATOMIC_RELAXED);
+    /* The data is in place: complete the MPI receive (dst NULL: nothing to copy). */
+    if (err) {
+        rreq->req_started = true;
+        rreq->super.ompi_req->req_status.MPI_ERROR = MPI_ERR_INTERN;
+        rreq->super.ompi_req->req_status.MPI_SOURCE = ue->src_rank;
+        rreq->super.ompi_req->req_status.MPI_TAG = ue->tag;
+        ompi_mtl_ofi_deregister_buffer(rreq);
+        rreq->super.completion_callback(&rreq->super);
+    } else {
+        sc_finish_recv(rreq, NULL, ue->src_rank, ue->tag, NULL, ue->len);
+    }
+    sc_dma_put(d);
+}
+
+static void sc_dma_tx_done(sc_dma_t *d)
+{
+    lithe_context_t *sw;
+
+    /* The NIC has read the whole source: the sender's buffer is free. */
+    __atomic_add_fetch(&ompi_mtl_ofi_sc_dma_tx_n, 1, __ATOMIC_RELAXED);
+    sc_lock(d->slot);
+    sw = sc_release_ssend(d->ue);
+    sc_unlock(d->slot);
+    if (NULL != sw) {
+        lithe_context_unblock(sw);
+    }
+    sc_dma_put(d);
+}
+
+static int sc_dma_rx_cb(struct fi_cq_tagged_entry *wc, ompi_mtl_ofi_request_t *r)
+{
+    (void) wc;
+    sc_dma_rx_done(container_of(r, sc_dma_t, rx), 0);
+    return OMPI_SUCCESS;
+}
+
+static int sc_dma_rx_err_cb(struct fi_cq_err_entry *e, ompi_mtl_ofi_request_t *r)
+{
+    opal_output(0, "mtl:ofi: LITHE_SC_DMA receive failed: %s(%d)", fi_strerror(e->err), e->err);
+    sc_dma_rx_done(container_of(r, sc_dma_t, rx), 1);
+    return OMPI_SUCCESS;
+}
+
+static int sc_dma_tx_cb(struct fi_cq_tagged_entry *wc, ompi_mtl_ofi_request_t *r)
+{
+    (void) wc;
+    sc_dma_tx_done(container_of(r, sc_dma_t, tx));
+    return OMPI_SUCCESS;
+}
+
+static int sc_dma_tx_err_cb(struct fi_cq_err_entry *e, ompi_mtl_ofi_request_t *r)
+{
+    opal_output(0, "mtl:ofi: LITHE_SC_DMA send failed: %s(%d)", fi_strerror(e->err), e->err);
+    sc_dma_tx_done(container_of(r, sc_dma_t, tx));
+    return OMPI_SUCCESS;
+}
+
+static int sc_dma_eligible(size_t len, ompi_mtl_ofi_request_t *rreq, void *dst)
+{
+    return sc_dma_min > 0 && len >= sc_dma_min && NULL != dst && NULL == rreq->buffer;
+}
+
+/* Issue the NIC copy for UE (ue->buf -> ue->rdst, matched, rreq started). Called with the
+ * slot UNLOCKED, on the matching context. Returns 0 if it could not allocate (caller copies). */
+static int sc_dma_issue(struct ompi_communicator_t *comm,
+                        ompi_mtl_ofi_hosted_sc_slot_t *slot,
+                        ompi_mtl_ofi_hosted_sc_ue_t *ue)
+{
+    sc_dma_t *d = calloc(1, sizeof(*d));
+    ompi_proc_t *me;
+    mca_mtl_ofi_endpoint_t *ep;
+    fi_addr_t self_addr;
+    uint64_t tag;
+    size_t len;
+    ssize_t ret;
+    int ctxt;
+
+    if (NULL == d) {
+        return 0;
+    }
+    ctxt = ompi_mtl_ofi_ctxt_index_for_comm(comm);
+    me = ompi_comm_peer_lookup(comm, ompi_mtl_ofi_comm_rank(comm));
+    ep = ompi_mtl_ofi_get_endpoint(&ompi_mtl_ofi.base, me);
+    self_addr = fi_rx_addr(ep->peer_fiaddr, ompi_mtl_ofi_sep_peer_rx_ctxt(me, ctxt),
+                           ompi_mtl_ofi.rx_ctx_bits);
+    len = ue->len < ue->rreq->length ? ue->len : ue->rreq->length;
+    tag = SC_DMA_PROTO | (uint64_t) (__atomic_add_fetch(&sc_dma_seq, 1, __ATOMIC_RELAXED) & 0x7FFFFFFFu);
+
+    if (ctxt >= SC_DMA_MAX_CTXT) {
+        free(d);
+        return 0;
+    }
+    d->slot = slot;
+    d->ue = ue;
+    d->left = 2;
+    d->ctxt = ctxt;
+    sc_dma_ep_get(ctxt);
+    d->rx.event_callback = sc_dma_rx_cb;
+    d->rx.error_callback = sc_dma_rx_err_cb;
+    d->tx.event_callback = sc_dma_tx_cb;
+    d->tx.error_callback = sc_dma_tx_err_cb;
+
+    MTL_OFI_RETRY_UNTIL_DONE_CTXT(fi_trecv(ompi_mtl_ofi.ofi_ctxt[ctxt].rx_ep, ue->rdst, len, NULL,
+                                           FI_ADDR_UNSPEC, tag, 0, (void *) &d->rx.ctx),
+                                  ret, ctxt);
+    if (OPAL_UNLIKELY(0 > ret)) {
+        opal_output(0, "mtl:ofi: LITHE_SC_DMA fi_trecv: %s(%zd)", fi_strerror((int) -ret), ret);
+        abort();
+    }
+    MTL_OFI_RETRY_UNTIL_DONE_CTXT(fi_tsend(ompi_mtl_ofi.ofi_ctxt[ctxt].tx_ep, ue->buf, len, NULL,
+                                           self_addr, tag, (void *) &d->tx.ctx),
+                                  ret, ctxt);
+    if (OPAL_UNLIKELY(0 > ret)) {
+        opal_output(0, "mtl:ofi: LITHE_SC_DMA fi_tsend: %s(%zd)", fi_strerror((int) -ret), ret);
+        abort();
+    }
+    __atomic_add_fetch(&sc_dma_n, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&sc_dma_bytes, (long) len, __ATOMIC_RELAXED);
+    return 1;
+}
+
 /* opal_lithe_wait_sync_spinning hook (base/wait_sync.c). */
 static void sc_wait_spinning(int on)
 {
@@ -722,6 +1013,12 @@ int ompi_mtl_ofi_hosted_sc_init(void)
         opal_lithe_wait_sync_spinning = sc_wait_spinning;
     }
     sc_prog_start();
+    e = getenv("LITHE_SC_DMA");
+    if (NULL != e) {
+        sc_dma_min = atol(e) > 0 ? (size_t) atol(e) : 0;
+    }
+    e = getenv("LITHE_SC_DMA_EPCTX");
+    sc_dma_epctx = (NULL == e || '0' != e[0]);
     opal_output_verbose(1, opal_common_ofi.output,
                         "mtl:ofi: hosted same-OS short-circuit enabled (slots=%lu multi_os=%d)",
                         rph, sc_multi_os_world());
@@ -733,6 +1030,11 @@ void ompi_mtl_ofi_hosted_sc_finalize(void)
     unsigned long i;
 
     sc_prog_stop_wait();
+    sc_dma_stop_wait();
+    if (sc_dma_n > 0 && NULL != getenv("LITHE_SC_DMA_STATS")) {
+        fprintf(stderr, "[sc_dma] copies=%ld bytes=%ld parks=%ld drains=%ld\n", sc_dma_n,
+                sc_dma_bytes, sc_dma_parks, sc_dma_drains);
+    }
     opal_progress_set_sc_park_callback(NULL);
     opal_lithe_wait_sync_spinning = NULL;
     if (NULL == sc_slots) {
@@ -898,6 +1200,37 @@ int ompi_mtl_ofi_hosted_sc_try_send(struct ompi_communicator_t *comm, int dest,
             if (free_after && NULL != start) {
                 free(start);
             }
+        }
+        if (NULL != recv_waiter) {
+            lithe_context_unblock(recv_waiter);
+        }
+        return 1;
+    }
+
+    if (NULL != matched_recv && is_isend && !free_after && dest != src_rank
+        && !need_ofi_cancel && sc_dma_eligible(length, matched_recv, matched_dst)
+        && NULL != (ue = sc_ue_get(slot))) {
+        /* LITHE_SC_DMA: the NIC moves the bytes; this Isend returns at once. */
+        matched_recv->req_started = true;
+        ue->buf = start;
+        ue->len = length;
+        ue->tag = tag;
+        ue->src_rank = src_rank;
+        ue->cid = cid;
+        ue->is_sync = 1;
+        ue->borrowed = 1;
+        ue->send_is_isend = 1;
+        ue->send_req = ofi_req;
+        ue->send_waiter = NULL;
+        ue->rreq = matched_recv;
+        ue->rdst = matched_dst;
+        ofi_req->completion_count = 1;
+        ofi_req->status.MPI_ERROR = OMPI_SUCCESS;
+        sc_unlock(slot);
+        if (!sc_dma_issue(comm, slot, ue)) {
+            sc_ue_put(slot, ue);
+            sc_finish_recv(matched_recv, matched_dst, src_rank, tag, start, length);
+            sc_finish_send(ofi_req, true, free_after, start);
         }
         if (NULL != recv_waiter) {
             lithe_context_unblock(recv_waiter);
@@ -1213,6 +1546,18 @@ int ompi_mtl_ofi_hosted_sc_try_irecv(struct ompi_communicator_t *comm, int src,
         }
         opal_list_remove_item(&slot->unexpected, &ue->super);
         sc_trace(3, (int) opal_proc_local_get()->proc_name.vpid, ue->src_rank, ue->tag, cid, ofi_req);
+        if (ue->borrowed && sc_dma_eligible(ue->len, ofi_req, start)) {
+            /* LITHE_SC_DMA: the NIC copies out of the borrowed sender buffer; the
+             * sender is released from the send completion (sc_dma_tx_done). */
+            ofi_req->req_started = true;
+            ue->rreq = ofi_req;
+            ue->rdst = start;
+            sc_unlock(slot);
+            if (sc_dma_issue(comm, slot, ue)) {
+                return 1;
+            }
+            sc_lock(slot);
+        }
         if (ue->borrowed && sc_prog_min > 0 && ue->len >= sc_prog_min
             && NULL == ofi_req->buffer) {
             /* LITHE_SC_PROGRESS: the rendezvous copy goes to the progress context
