@@ -128,8 +128,13 @@ int opal_lithe_wait_sync_direct_resolve(void)
     if (0 == opal_process_info.num_procs) {
         return 0;
     }
-    if (opal_process_info.num_procs > opal_lithe_env_cache_rph()) {
-        opal_lithe_wait_sync_direct = 0; /* multi-OS: OFI completions need the CQ engine */
+    if (opal_process_info.num_procs > opal_lithe_env_cache_rph() &&
+        !(NULL != e && '2' == e[0])) {
+        /* multi-OS: OFI completions need the CQ engine. LITHE_WAIT_SYNC_DIRECT=2
+         * (2026-10-26, A/B) forces direct waits there too: with MULTI_EP every
+         * context owns its CQ, so each waiter can progress its own instead of
+         * one elected progress thread condvar-waking the rest. */
+        opal_lithe_wait_sync_direct = 0;
         return 0;
     }
     if ((e = getenv("LITHE_WAIT_SYNC_DIRECT_SPIN"))) lithe_wsd_spin = (unsigned) atoi(e);

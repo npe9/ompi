@@ -534,6 +534,25 @@ ompi_mtl_ofi_lithe_multicontext_ctxt_index(void)
     }
 }
 
+/*
+ * Multi regular-EP receives must be directed at the sending slot's EP. With
+ * FI_REMOTE_CQ_DATA the match tag carries no source, so an UNSPEC receive on a
+ * slot EP matches any remote rank's same-tag message: all-pairs Isend/Irecv
+ * between >=2 OS processes delivered rank 6's payload to the receive for rank 4
+ * (2026-10-26, 4 processes x 2 contexts: wrong Allreduce/Reduce sums, bigred hang).
+ * Recursive doubling with 2 processes passed only because each slot then has one
+ * remote sender. LITHE_MTL_OFI_MULTI_EP_DIRECTED=0 restores the old UNSPEC receive.
+ */
+__opal_attribute_always_inline__ static inline int ompi_mtl_ofi_mep_directed(void)
+{
+    static int on = -1;
+    if (OPAL_UNLIKELY(on < 0)) {
+        const char *e = getenv("LITHE_MTL_OFI_MULTI_EP_DIRECTED");
+        on = !(e && e[0] == '0');
+    }
+    return on;
+}
+
 __opal_attribute_always_inline__ static inline int
 ompi_mtl_ofi_ctxt_index_for_comm(struct ompi_communicator_t *comm)
 {
@@ -2609,15 +2628,16 @@ ompi_mtl_ofi_irecv_generic(struct mca_mtl_base_module_t *mtl,
         if (MPI_ANY_SOURCE != src) {
             ompi_proc = ompi_comm_peer_lookup(comm, src);
             endpoint = ompi_mtl_ofi_get_endpoint(mtl, ompi_proc);
-            /* Multi regular-EP demux: co-resident peer EP addresses differ,
-             * but matching is per-EP; keep UNSPEC (opt-in mode). */
+            /* Multi regular-EP: direct the receive at the peer slot's EP
+             * (ompi_mtl_ofi_mep_directed: UNSPEC matched the wrong sender). */
             if (!ompi_mtl_ofi.hosted_multi_ep &&
                 !ompi_mtl_ofi.hosted_dst_in_cqd_tag) {
                 remote_addr = fi_rx_addr(endpoint->peer_fiaddr, ctxt_id,
                                          ompi_mtl_ofi.rx_ctx_bits);
             }
 #if HAVE_LITHE
-            else if (ompi_mtl_ofi.hosted_dst_in_cqd_tag) {
+            else if (ompi_mtl_ofi.hosted_dst_in_cqd_tag ||
+                     (ompi_mtl_ofi.hosted_multi_ep && ompi_mtl_ofi_mep_directed())) {
                 /* Hosted no-SEP: src-slot tag bits isolate co-resident ranks
                  * only. With >=3 OS processes, remote peers alias the same
                  * slot (vpid%RPH), so pin the sending OS process with
@@ -2972,7 +2992,8 @@ ompi_mtl_ofi_iprobe_generic(struct mca_mtl_base_module_t *mtl,
                                          ompi_mtl_ofi.rx_ctx_bits);
             }
 #if HAVE_LITHE
-            else if (ompi_mtl_ofi.hosted_dst_in_cqd_tag) {
+            else if (ompi_mtl_ofi.hosted_dst_in_cqd_tag ||
+                     (ompi_mtl_ofi.hosted_multi_ep && ompi_mtl_ofi_mep_directed())) {
                 /* Hosted no-SEP: pin sending OS process (see irecv). */
                 remote_proc = endpoint->peer_fiaddr;
             }
@@ -3116,7 +3137,8 @@ ompi_mtl_ofi_improbe_generic(struct mca_mtl_base_module_t *mtl,
                                          ompi_mtl_ofi.rx_ctx_bits);
             }
 #if HAVE_LITHE
-            else if (ompi_mtl_ofi.hosted_dst_in_cqd_tag) {
+            else if (ompi_mtl_ofi.hosted_dst_in_cqd_tag ||
+                     (ompi_mtl_ofi.hosted_multi_ep && ompi_mtl_ofi_mep_directed())) {
                 /* Hosted no-SEP: pin sending OS process (see irecv). */
                 remote_proc = endpoint->peer_fiaddr;
             }
