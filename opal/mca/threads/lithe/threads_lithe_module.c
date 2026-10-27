@@ -95,6 +95,16 @@ void opal_threads_lithe_ensure_opal_fork_join_sched(void)
      * pool, owned by lithe/parlib), and everyone else gets the same root. This
      * avoids a second conflicting bootstrap. See the
      * lithe-bootstrap-any-runtime-combination rule. */
+    /* Hosted logical ranks (LITHE_CONTEXT_RANKS_PER_HOST>1) share this process's root
+     * with many rank contexts: opt out of Lithe's cache-affine blocking policy (idle
+     * harts kept in the root + a 5 us steal delay), which costs the hosted 4x4 1 MiB
+     * allreduce 10 % (GAPS B73). One-rank processes keep it (LULESH +38 %). */
+    {
+        const char *rph = getenv("LITHE_CONTEXT_RANKS_PER_HOST");
+        if (rph != NULL && atoi(rph) > 1) {
+            lithe_fork_join_set_affine_policy(0);
+        }
+    }
     opal_sched = lithe_ensure_root_fork_join_sched();
     if (opal_sched == NULL) {
         fprintf(stderr, "[OPAL-Lithe] lithe_ensure_root_fork_join_sched returned NULL\n");
