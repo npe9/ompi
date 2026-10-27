@@ -56,6 +56,11 @@ typedef struct ompi_wait_sync_t {
     struct ompi_wait_sync_t *next;
     struct ompi_wait_sync_t *prev;
     volatile bool signaling;
+#if HAVE_LITHE
+    /* CQ wait fd a direct waiter is parked on (reactor), else -1: the completer
+     * cancels that park as well as waking the futex (LITHE_WAIT_SYNC_CQ_PARK). */
+    volatile int park_fd;
+#endif
 } ompi_wait_sync_t;
 
 #define SYNC_WAIT(sync) (opal_using_threads() ? ompi_sync_wait_mt(sync) : sync_wait_st(sync))
@@ -152,6 +157,11 @@ OPAL_DECLSPEC extern int (*opal_lithe_wait_sync_keep_progress)(void);
 /* Set by mtl/ofi's hosted SC path: 1 while the calling context spins in a direct
  * wait, 0 before it yields, sleeps or returns (base/wait_sync.c). */
 OPAL_DECLSPEC extern void (*opal_lithe_wait_sync_spinning)(int on);
+/* Set by mtl/ofi: park the calling context on its own CQ wait fd while sync's count
+ * is still c, publishing the fd in sync->park_fd. Returns 0 if it cannot park
+ * (caller falls back to the futex sleep), 1 otherwise (base/wait_sync.c). */
+OPAL_DECLSPEC extern int (*opal_lithe_wait_sync_cq_park)(struct ompi_wait_sync_t *sync, int32_t c);
+OPAL_DECLSPEC extern void (*opal_lithe_wait_sync_cq_unpark)(int fd);
 /* Waiters (direct wait_sync, flat barrier) currently queued after a yield. */
 OPAL_DECLSPEC extern opal_atomic_int32_t opal_lithe_wait_queued;
 OPAL_DECLSPEC extern int opal_lithe_wait_sync_direct;
@@ -164,6 +174,10 @@ static inline int opal_lithe_wait_sync_direct_on(void)
     if (opal_using_threads()) {                                   \
         if (opal_lithe_wait_sync_direct_on()) {                   \
             futex_wake_all((int *) &(sync)->count);               \
+            int _pfd = __atomic_load_n(&(sync)->park_fd,          \
+                                       __ATOMIC_SEQ_CST);         \
+            if (_pfd >= 0 && NULL != opal_lithe_wait_sync_cq_unpark) \
+                opal_lithe_wait_sync_cq_unpark(_pfd);             \
         } else {                                                  \
             opal_thread_internal_mutex_lock(&(sync)->lock);       \
             opal_thread_internal_cond_signal(&(sync)->condition); \
@@ -240,6 +254,11 @@ static inline int sync_wait_st(ompi_wait_sync_t *sync)
         return sync->status; }
 }
 
+#if HAVE_LITHE
+#define WAIT_SYNC_INIT_PARK_FD(sync) ((sync)->park_fd = -1)
+#else
+#define WAIT_SYNC_INIT_PARK_FD(sync) ((void) 0)
+#endif
 #define WAIT_SYNC_INIT(sync, c)                                    \
     do {                                                           \
         (sync)->count = (c);                                       \
@@ -247,6 +266,7 @@ static inline int sync_wait_st(ompi_wait_sync_t *sync)
         (sync)->prev = NULL;                                       \
         (sync)->status = 0;                                        \
         (sync)->signaling = (0 != (c));                            \
+        WAIT_SYNC_INIT_PARK_FD(sync);                              \
         if (opal_using_threads()) {                                \
             opal_thread_internal_cond_init(&(sync)->condition);    \
             opal_thread_internal_mutex_init(&(sync)->lock, false); \

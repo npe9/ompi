@@ -85,6 +85,22 @@ int (*opal_lithe_wait_sync_keep_progress)(void) = NULL;
  * spins in a direct wait on its hart and 0 before it yields, sleeps or returns, so
  * senders can leave large copies to it (GAPS C17.7). */
 void (*opal_lithe_wait_sync_spinning)(int on) = NULL;
+/* LITHE_WAIT_SYNC_CQ_PARK (2026-10-26, default off for A/B; mtl/ofi sets the hooks).
+ * Multi-OS hosted worlds (LITHE_WAIT_SYNC_DIRECT=2) slept in a 100 us timed futex
+ * that NIC completions cannot wake: a remote message waited out the timer, and
+ * multi-OS allreduce/all-pairs/1 MiB stayed 1.6-2x the one-rank-per-process arm
+ * (GAPS B65). With the gate on, the sleep parks on the calling context's CQ wait fd
+ * in the reactor instead, so a NIC completion wakes it, and the completer of a
+ * same-process delivery cancels that park (WAIT_SYNC_SIGNAL reads sync->park_fd)
+ * as well as waking the futex.
+ * NEGATIVE (2026-10-26, 4 proc x 4 ctx on 3 harts, n=3, .build_logs/devloc/cqpark_ab.txt):
+ * allreduce 58.9 -> 77.7 us, all-pairs 144.8 -> 166.3, halo 20.4 -> 24.0, 1 MiB even.
+ * The sleep is rare (tens to a few thousand parks per 2000 iterations) and most wakes
+ * are same-process deliveries the futex already serves; a reactor park adds an epoll
+ * arm and a NIC interrupt. The 1.6-2x multi-OS gap was the parlib MCS unlock witness
+ * (GAPS B66), not this sleep. Kept off for reference. */
+int (*opal_lithe_wait_sync_cq_park)(struct ompi_wait_sync_t *sync, int32_t c) = NULL;
+void (*opal_lithe_wait_sync_cq_unpark)(int fd) = NULL;
 #define LITHE_WSD_SPINNING(on) \
     do { if (NULL != opal_lithe_wait_sync_spinning) opal_lithe_wait_sync_spinning(on); } while (0)
 static unsigned lithe_wsd_spin = 256, lithe_wsd_progress = 32, lithe_wsd_timeout_us = 100;
@@ -165,7 +181,9 @@ static void lithe_sync_wait_direct_sleep(ompi_wait_sync_t *sync)
     }
     if (c > 0 && lithe_can_block()) {
         LITHE_WSD_SPINNING(0);
-        if (0 == lithe_wsd_timeout_us) {
+        if (NULL != opal_lithe_wait_sync_cq_park && opal_lithe_wait_sync_cq_park(sync, c)) {
+            /* parked on the CQ fd (or found the count/CQ already moved) */
+        } else if (0 == lithe_wsd_timeout_us) {
             /* Untimed: the timer arm + cancel per sleep was ~8 % of a hosted halo
              * loop (parlib_timer_cancel). Safe for what we know needs opal_progress
              * only because owners of libnbc requests never get here

@@ -915,6 +915,49 @@ static void sc_wait_spinning(int on)
     }
 }
 
+/* opal_lithe_wait_sync_cq_park hook (base/wait_sync.c, LITHE_WAIT_SYNC_CQ_PARK=1).
+ * Multi-OS MULTI_EP only: every context owns its CQ, so a direct waiter parks on its
+ * own CQ's wait fd and a NIC completion wakes it. Publish the fd before rechecking
+ * the count; the completer reads it after decrementing the count (Dekker, seq_cst)
+ * and kicks the fd, which leaves a token if we have not armed yet. The timeout
+ * (LITHE_WAIT_SYNC_CQ_PARK_MS, default 1) is a safety net, not a poll period. */
+static int sc_cq_park_ms = 1;
+static long sc_cq_parks, sc_cq_park_skips;
+static int sc_wait_cq_park(struct ompi_wait_sync_t *sync, int32_t c)
+{
+    int ctxt, fd, tw;
+    struct fid *f;
+
+    if (!ompi_mtl_ofi.hosted_multi_ep || !ompi_mtl_ofi.progress_block_enabled ||
+        !sc_multi_os_world()) {
+        return 0;
+    }
+    ctxt = ompi_mtl_ofi_lithe_multicontext_ctxt_index();
+    if (ctxt < 0 || (fd = ompi_mtl_ofi.ofi_ctxt[ctxt].cq_wait_fd) < 0) {
+        return 0;
+    }
+    __atomic_store_n(&sync->park_fd, fd, __ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&sync->count, __ATOMIC_SEQ_CST) == c) {
+        f = &ompi_mtl_ofi.ofi_ctxt[ctxt].cq->fid;
+        mtl_ofi_cq_context_enter_multicontext(ctxt);
+        tw = fi_trywait(ompi_mtl_ofi.fabric, &f, 1);
+        mtl_ofi_cq_context_exit_multicontext(ctxt);
+        if (FI_SUCCESS == tw) {
+            __atomic_add_fetch(&sc_cq_parks, 1, __ATOMIC_RELAXED);
+            (void) parlib_reactor_wait(fd, EPOLLIN | EPOLLERR | EPOLLHUP, sc_cq_park_ms);
+        } else {
+            __atomic_add_fetch(&sc_cq_park_skips, 1, __ATOMIC_RELAXED); /* CQ has entries */
+        }
+    }
+    __atomic_store_n(&sync->park_fd, -1, __ATOMIC_SEQ_CST);
+    return 1;
+}
+
+static void sc_wait_cq_unpark(int fd)
+{
+    (void) parlib_reactor_kick_fd(fd);
+}
+
 int ompi_mtl_ofi_hosted_sc_enabled(void)
 {
     unsigned long rph;
@@ -1030,6 +1073,15 @@ int ompi_mtl_ofi_hosted_sc_init(void)
     if (sc_pull) {
         opal_lithe_wait_sync_spinning = sc_wait_spinning;
     }
+    e = getenv("LITHE_WAIT_SYNC_CQ_PARK");
+    if (NULL != e && '1' == e[0]) {
+        const char *ms = getenv("LITHE_WAIT_SYNC_CQ_PARK_MS");
+        if (NULL != ms && atoi(ms) >= 0) {
+            sc_cq_park_ms = atoi(ms);
+        }
+        opal_lithe_wait_sync_cq_unpark = sc_wait_cq_unpark;
+        opal_lithe_wait_sync_cq_park = sc_wait_cq_park;
+    }
     sc_prog_start();
     e = getenv("LITHE_SC_DMA");
     if (NULL != e) {
@@ -1070,6 +1122,10 @@ void ompi_mtl_ofi_hosted_sc_finalize(void)
     }
     opal_progress_set_sc_park_callback(NULL);
     opal_lithe_wait_sync_spinning = NULL;
+    opal_lithe_wait_sync_cq_park = NULL; /* unpark stays: a late completer may still read park_fd */
+    if (sc_cq_parks + sc_cq_park_skips > 0 && NULL != getenv("LITHE_WAIT_SYNC_CQ_PARK_STATS")) {
+        fprintf(stderr, "[cq_park] parks=%ld skips=%ld\n", sc_cq_parks, sc_cq_park_skips);
+    }
     if (NULL == sc_slots) {
         sc_enabled = 0;
         return;

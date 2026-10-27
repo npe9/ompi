@@ -816,6 +816,31 @@ mtl_ofi_mc_wake_cq_waiters(int ctxt_id, int got)
     }
 }
 
+/* LITHE_MTL_OFI_MEP_SWEEP=N (2026-10-26, default 1 = every outer progress call, as
+ * before; 0 = never; N = every Nth call per context). In multi-OS MULTI_EP worlds every
+ * context trylock-swept all the others' CQs on every progress call; perf of a 4 proc
+ * x 4 ctx allreduce: ~60 % of cycles in the Lithe mutex MCS locks under libfabric's
+ * CQ/EP locks (ofi_cq_readfrom 35 % inclusive), i.e. contexts fighting over each
+ * other's CQs. The sweep is there for a waiter that is not polling its own CQ (P1K2
+ * hang, condvar path); with direct waits (LITHE_WAIT_SYNC_DIRECT=2) each waiter polls
+ * its own, and with LITHE_WAIT_SYNC_CQ_PARK=1 a sleeping one is woken by its CQ fd.
+ * NEGATIVE: 0 or 16 gave nothing (4x4 allreduce 66 -> 80/67 us, all-pairs 266 -> 276/225,
+ * n=1 each; with the witness fix, n=3: equal within spread). The lock time was the parlib
+ * MCS unlock witness, one global line per mutex op (GAPS B66), not the sweep. */
+__opal_attribute_always_inline__ static inline int ompi_mtl_ofi_mep_sweep_now(void)
+{
+    static int every = -1;
+    static __thread unsigned calls; /* per Lithe context */
+    if (OPAL_UNLIKELY(every < 0)) {
+        const char *e = getenv("LITHE_MTL_OFI_MEP_SWEEP");
+        every = (e && *e) ? atoi(e) : 1;
+        if (every < 0) every = 1;
+    }
+    if (OPAL_LIKELY(1 == every)) return 1;
+    if (0 == every) return 0;
+    return 0 == (++calls % (unsigned) every);
+}
+
 /* Own-CQ drain + optional peer trylock sweep. Never parks.
  * blocking_own=0: trylock own CQ (spin path — do not block a hart on the
  * shared no-SEP mutex while a peer holds it for fi_cq_read).
@@ -834,7 +859,8 @@ mtl_ofi_mc_progress_once(int ctxt_id, int outer, int sweep_peers, int blocking_o
     mtl_ofi_cq_context_exit_multicontext(ctxt_id);
     mtl_ofi_mc_wake_cq_waiters(ctxt_id, count);
 
-    if (outer && sweep_peers && (count == 0 || ompi_mtl_ofi.hosted_multi_ep)) {
+    if (outer && sweep_peers && (count == 0 || ompi_mtl_ofi.hosted_multi_ep) &&
+        (!ompi_mtl_ofi.hosted_multi_ep || ompi_mtl_ofi_mep_sweep_now())) {
         int j;
         int n = ompi_mtl_ofi.total_ctxts_used;
         for (j = 1; j < n; j++) {
@@ -899,7 +925,8 @@ ompi_mtl_ofi_progress(void)
          * After draining a peer CQ, cancel any uthread parked on that CQ's
          * wait_fd — fi_cq_read consumes the event that would have woken them
          * (lost-wakeup hang). Same cancel applies to shared single-CQ. */
-        if (outer && (count == 0 || ompi_mtl_ofi.hosted_multi_ep)) {
+        if (outer && (count == 0 || ompi_mtl_ofi.hosted_multi_ep) &&
+            (!ompi_mtl_ofi.hosted_multi_ep || ompi_mtl_ofi_mep_sweep_now())) {
             int j;
             int n = ompi_mtl_ofi.total_ctxts_used;
             (void) num_calls;
