@@ -336,10 +336,28 @@ static int sc_coll_leaders_a2a_wanted(int num_os)
     return (num_os >= 3 && num_os <= 32) ? 1 : 0;
 }
 
+/* LITHE_SC_COLL_LOAD=1 (2026-10-26, default off: NULL at n=13, GAPS B67): the
+ * spin loops read the shared arrived/epoch words with opal_atomic_add_fetch_32(x, 0),
+ * a locked RMW that takes the line exclusive on every iteration and steals it from
+ * the rank that is arriving or publishing. An acquire load gives the same ordering
+ * (the P1K4 register-caching bug needed an atomic load, not an RMW). */
+static int sc_coll_load_mode = -1;
+static inline int32_t sc_coll_load(opal_atomic_int32_t *x)
+{
+    if (OPAL_UNLIKELY(sc_coll_load_mode < 0)) {
+        const char *e = getenv("LITHE_SC_COLL_LOAD");
+        sc_coll_load_mode = (NULL != e && '1' == e[0]) ? 1 : 0;
+    }
+    if (sc_coll_load_mode) {
+        return __atomic_load_n((int32_t *) x, __ATOMIC_SEQ_CST); /* plain mov on x86 */
+    }
+    return opal_atomic_add_fetch_32(x, 0);
+}
+
 /* Epoch/bank from arrived snapshot; copy-before-arrive safe (see file header). */
 static int32_t sc_coll_epoch_bank(int size, int *bank_out)
 {
-    int32_t snap = opal_atomic_add_fetch_32(&sc_coll.arrived, 0);
+    int32_t snap = sc_coll_load(&sc_coll.arrived);
     int32_t epoch = (snap / (int32_t) size) + 1;
     *bank_out = (int) ((epoch - 1) & 1);
     return epoch;
@@ -944,7 +962,7 @@ static void sc_coll_ticket_barrier(int size, int with_progress)
      * register and release early → peers reduce before all slots publish
      * (P1K4 rank0 sum=4, others sum=2/3). */
     do {
-        cur = opal_atomic_add_fetch_32(&sc_coll.arrived, 0);
+        cur = sc_coll_load(&sc_coll.arrived);
         if (cur >= goal) {
             break;
         }
@@ -1062,7 +1080,7 @@ static inline void sc_epoch_publish(opal_atomic_int32_t *slot, int32_t v)
 {
     opal_atomic_swap_32(slot, v);
 #if HAVE_LITHE
-    if (OPAL_UNLIKELY(0 != opal_atomic_add_fetch_32(&sc_epoch_sleepers, 0))) {
+    if (OPAL_UNLIKELY(0 != sc_coll_load(&sc_epoch_sleepers))) {
         futex_wake_all((int *) slot);
     }
 #endif
@@ -1083,7 +1101,7 @@ static void sc_coll_wait_epoch(opal_atomic_int32_t *epoch_slot, int32_t expect,
         mtp_cached = (m >= 2) ? 2 : 1;
     }
 #endif
-    while (opal_atomic_add_fetch_32(epoch_slot, 0) != expect) {
+    while (sc_coll_load(epoch_slot) != expect) {
 #if HAVE_LITHE
         if (with_progress >= 2) {
             if (lithe_fork_join_should_yield_to_runnable() ||
@@ -1117,7 +1135,7 @@ static void sc_coll_wait_epoch(opal_atomic_int32_t *epoch_slot, int32_t expect,
             int32_t cur;
             idle = 0;
             opal_atomic_add_fetch_32(&sc_epoch_sleepers, 1); /* SEQ_CST: before the recheck */
-            cur = opal_atomic_add_fetch_32(epoch_slot, 0);
+            cur = sc_coll_load(epoch_slot);
             if (cur != expect) {
                 (void) futex_wait((int *) epoch_slot, (int) cur);
             }
