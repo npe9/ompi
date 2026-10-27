@@ -896,6 +896,19 @@ static int sc_dma_issue(struct ompi_communicator_t *comm,
     return 1;
 }
 
+ompi_mtl_ofi_mc_asleep_t ompi_mtl_ofi_mc_asleep[MTL_OFI_MC_ASLEEP_MAX];
+int ompi_mtl_ofi_mep_sweep_every = -2;
+
+/* opal_lithe_wait_sync_sleeping hook: publish this context's sleep for the
+ * asleep-only peer sweep (LITHE_MTL_OFI_MEP_SWEEP=-1). */
+static void mc_wait_sleeping(int on)
+{
+    int c = ompi_mtl_ofi_lithe_multicontext_ctxt_index();
+    if (c >= 0 && c < MTL_OFI_MC_ASLEEP_MAX) {
+        __atomic_store_n(&ompi_mtl_ofi_mc_asleep[c].v, on, __ATOMIC_SEQ_CST);
+    }
+}
+
 /* opal_lithe_wait_sync_spinning hook (base/wait_sync.c). */
 static void sc_wait_spinning(int on)
 {
@@ -1072,6 +1085,9 @@ int ompi_mtl_ofi_hosted_sc_init(void)
     }
     if (sc_pull) {
         opal_lithe_wait_sync_spinning = sc_wait_spinning;
+    }
+    if (-1 == ompi_mtl_ofi_mep_sweep_mode()) {
+        opal_lithe_wait_sync_sleeping = mc_wait_sleeping;
     }
     e = getenv("LITHE_WAIT_SYNC_CQ_PARK");
     if (NULL != e && '1' == e[0]) {

@@ -791,6 +791,27 @@ ompi_mtl_ofi_context_progress_block(int ctxt_id)
      * normal CQ processor after readiness. This avoids both busy polling and
      * an unbounded fi_cq_sread() that can sleep before non-CQ collective state
      * has been advanced. */
+    /* Arm before parking (GAPS B69, 2026-10-27): cxi enables the CQ's EQ interrupt only
+     * in fi_trywait, so an un-armed untimed park could sleep through its own completions.
+     * It was woken only when a peer context's CQ sweep drained this CQ and cancelled the
+     * fd; with the sweep off (LITHE_MTL_OFI_MEP_SWEEP=0) 4x4 on 3 harts hung 3/8.
+     * fi_trywait != FI_SUCCESS means events are ready: drain instead of parking.
+     * LITHE_MTL_OFI_BLOCK_TRYWAIT=0 restores the old un-armed park. */
+    {
+        static int arm = -1;
+        if (OPAL_UNLIKELY(arm < 0)) {
+            const char *e = getenv("LITHE_MTL_OFI_BLOCK_TRYWAIT");
+            arm = !(e && e[0] == '0');
+        }
+        if (arm) {
+            struct fid *f = &ompi_mtl_ofi.ofi_ctxt[ctxt_id].cq->fid;
+            /* the multicontext caller already holds this ctxt's (non-recursive) lock */
+            int tw = fi_trywait(ompi_mtl_ofi.fabric, &f, 1);
+            if (FI_SUCCESS != tw) {
+                return ompi_mtl_ofi_context_progress(ctxt_id);
+            }
+        }
+    }
     int rev = parlib_reactor_wait(wait_fd, EPOLLIN | EPOLLERR | EPOLLHUP, -1);
     if (rev <= 0) {
         return 0;
@@ -827,16 +848,40 @@ mtl_ofi_mc_wake_cq_waiters(int ctxt_id, int got)
  * NEGATIVE: 0 or 16 gave nothing (4x4 allreduce 66 -> 80/67 us, all-pairs 266 -> 276/225,
  * n=1 each; with the witness fix, n=3: equal within spread). The lock time was the parlib
  * MCS unlock witness, one global line per mutex op (GAPS B66), not the sweep. */
+/* LITHE_MTL_OFI_MEP_SWEEP=-1 (GAPS B69, 2026-10-27): sweep only peers whose owner is
+ * asleep in a direct wait (ompi_mtl_ofi_mc_asleep, set by the wait_sync sleeping hook).
+ * The every-call sweep was 65 % of the hosted 4x4 allreduce lock wait (LITHE_LOCK_PROF:
+ * cxip_ep_progress, i.e. contexts taking each other's EP locks); with it off a sleeper's
+ * completions sat on its CQ until its 100 us timeout. Running owners poll their own CQ. */
+#define MTL_OFI_MC_ASLEEP_MAX 256
+typedef struct { volatile int v; char pad[60]; } ompi_mtl_ofi_mc_asleep_t;
+extern ompi_mtl_ofi_mc_asleep_t ompi_mtl_ofi_mc_asleep[MTL_OFI_MC_ASLEEP_MAX];
+extern int ompi_mtl_ofi_mep_sweep_every;   /* -2 = not read yet */
+
+__opal_attribute_always_inline__ static inline int ompi_mtl_ofi_mep_sweep_mode(void)
+{
+    if (OPAL_UNLIKELY(-2 == ompi_mtl_ofi_mep_sweep_every)) {
+        const char *e = getenv("LITHE_MTL_OFI_MEP_SWEEP");
+        /* default -1 since 2026-10-27 (B69, n=10: 4x4 allreduce -29 % with the MD
+         * front, halo -25 %, nbc -19 %; 320/320 clean); 1 = the old every-call sweep */
+        int v = (e && *e) ? atoi(e) : -1;
+        ompi_mtl_ofi_mep_sweep_every = (v < -1) ? -1 : v;
+    }
+    return ompi_mtl_ofi_mep_sweep_every;
+}
+
+/* Skip peer k in a sweep? Only in asleep-only mode, when k's owner is not asleep. */
+__opal_attribute_always_inline__ static inline int ompi_mtl_ofi_mep_sweep_skip(int k)
+{
+    return -1 == ompi_mtl_ofi_mep_sweep_every && k < MTL_OFI_MC_ASLEEP_MAX &&
+           !ompi_mtl_ofi_mc_asleep[k].v;
+}
+
 __opal_attribute_always_inline__ static inline int ompi_mtl_ofi_mep_sweep_now(void)
 {
-    static int every = -1;
     static __thread unsigned calls; /* per Lithe context */
-    if (OPAL_UNLIKELY(every < 0)) {
-        const char *e = getenv("LITHE_MTL_OFI_MEP_SWEEP");
-        every = (e && *e) ? atoi(e) : 1;
-        if (every < 0) every = 1;
-    }
-    if (OPAL_LIKELY(1 == every)) return 1;
+    int every = ompi_mtl_ofi_mep_sweep_mode();
+    if (OPAL_LIKELY(1 == every || -1 == every)) return 1;
     if (0 == every) return 0;
     return 0 == (++calls % (unsigned) every);
 }
@@ -865,6 +910,9 @@ mtl_ofi_mc_progress_once(int ctxt_id, int outer, int sweep_peers, int blocking_o
         int n = ompi_mtl_ofi.total_ctxts_used;
         for (j = 1; j < n; j++) {
             int k = (ctxt_id + j) % n;
+            if (ompi_mtl_ofi_mep_sweep_skip(k)) {
+                continue;
+            }
             if (mtl_ofi_cq_context_trylock_multicontext(k)) {
                 int got = ompi_mtl_ofi_context_progress(k);
                 count += got;
@@ -932,6 +980,9 @@ ompi_mtl_ofi_progress(void)
             (void) num_calls;
             for (j = 1; j < n; j++) {
                 int k = (ctxt_id + j) % n;
+                if (ompi_mtl_ofi_mep_sweep_skip(k)) {
+                    continue;
+                }
                 if (mtl_ofi_cq_context_trylock_multicontext(k)) {
                     int got = ompi_mtl_ofi_context_progress(k);
                     count += got;

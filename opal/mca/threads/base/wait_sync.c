@@ -85,6 +85,7 @@ int (*opal_lithe_wait_sync_keep_progress)(void) = NULL;
  * spins in a direct wait on its hart and 0 before it yields, sleeps or returns, so
  * senders can leave large copies to it (GAPS C17.7). */
 void (*opal_lithe_wait_sync_spinning)(int on) = NULL;
+void (*opal_lithe_wait_sync_sleeping)(int on) = NULL;
 /* LITHE_WAIT_SYNC_CQ_PARK (2026-10-26, default off for A/B; mtl/ofi sets the hooks).
  * Multi-OS hosted worlds (LITHE_WAIT_SYNC_DIRECT=2) slept in a 100 us timed futex
  * that NIC completions cannot wake: a remote message waited out the timer, and
@@ -181,6 +182,9 @@ static void lithe_sync_wait_direct_sleep(ompi_wait_sync_t *sync)
     }
     if (c > 0 && lithe_can_block()) {
         LITHE_WSD_SPINNING(0);
+        if (NULL != opal_lithe_wait_sync_sleeping) {
+            opal_lithe_wait_sync_sleeping(1);
+        }
         if (NULL != opal_lithe_wait_sync_cq_park && opal_lithe_wait_sync_cq_park(sync, c)) {
             /* parked on the CQ fd (or found the count/CQ already moved) */
         } else if (0 == lithe_wsd_timeout_us) {
@@ -192,6 +196,9 @@ static void lithe_sync_wait_direct_sleep(ompi_wait_sync_t *sync)
         } else {
             struct timespec rel = {0, (long) lithe_wsd_timeout_us * 1000L};
             (void) futex_wait_timeout((int *) &sync->count, (int) c, &rel);
+        }
+        if (NULL != opal_lithe_wait_sync_sleeping) {
+            opal_lithe_wait_sync_sleeping(0);
         }
         LITHE_WSD_SPINNING(1);
     }

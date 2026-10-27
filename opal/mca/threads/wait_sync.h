@@ -157,6 +157,8 @@ OPAL_DECLSPEC extern int (*opal_lithe_wait_sync_keep_progress)(void);
 /* Set by mtl/ofi's hosted SC path: 1 while the calling context spins in a direct
  * wait, 0 before it yields, sleeps or returns (base/wait_sync.c). */
 OPAL_DECLSPEC extern void (*opal_lithe_wait_sync_spinning)(int on);
+/* Set around a direct waiter's actual sleep (MTL: targeted peer sweep, GAPS B69). */
+OPAL_DECLSPEC extern void (*opal_lithe_wait_sync_sleeping)(int on);
 /* Set by mtl/ofi: park the calling context on its own CQ wait fd while sync's count
  * is still c, publishing the fd in sync->park_fd. Returns 0 if it cannot park
  * (caller falls back to the futex sleep), 1 otherwise (base/wait_sync.c). */
