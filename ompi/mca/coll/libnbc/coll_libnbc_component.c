@@ -62,6 +62,25 @@ static __thread bool libnbc_in_progress_ctx = false;
 /* Requests this Lithe context started and libnbc has not completed (hosted only). */
 __thread int ompi_coll_libnbc_owned_active = 0;
 
+/* LITHE_NBC_REPORT_ROUNDS (GAPS B70, 2026-10-27, default 1; =0 restores counting only
+ * finished requests). The progress callback returned the number of requests it
+ * COMPLETED, so a pass that only started the next round of a schedule reported 0
+ * events. A Lithe waiter takes "0 events" to mean "idle: park on the CQ fd until a
+ * completion arrives" (wait_sync -> opal_progress_block). A round that needs no CQ
+ * event to finish -- a tiny send the MTL injects (fi_tinject completes in software)
+ * -- then parks forever: one context per process, MPI_Iallreduce, hung 10/10 once
+ * the park was armed with fi_trywait (B69). A pass that advanced a schedule did
+ * work, so it counts as an event and the waiter polls again before parking. */
+static int libnbc_report_rounds(void)
+{
+    static int on = -1;
+    if (OPAL_UNLIKELY(on < 0)) {
+        const char *e = getenv("LITHE_NBC_REPORT_ROUNDS");
+        on = !(e && e[0] == '0');
+    }
+    return on;
+}
+
 static __attribute__((unused)) int libnbc_keep_progress(void)
 {
     return ompi_coll_libnbc_owned_active > 0;
@@ -108,7 +127,11 @@ static int libnbc_progress_hosted(void)
     }
     OPAL_THREAD_UNLOCK(&mca_coll_libnbc_component.lock);
     for (i = 0; i < n; ++i) {
+        long row = mine[i]->row_offset;
         res = NBC_Progress(mine[i]);
+        if (NBC_CONTINUE == res && mine[i]->row_offset != row && libnbc_report_rounds()) {
+            completed++;   /* started a round: not idle (see libnbc_report_rounds) */
+        }
         if (NBC_CONTINUE != res) {
             OPAL_THREAD_LOCK(&mca_coll_libnbc_component.lock);
             opal_list_remove_item(&mca_coll_libnbc_component.active_requests,
@@ -531,7 +554,11 @@ ompi_coll_libnbc_progress(void)
         OPAL_LIST_FOREACH_SAFE(request, next, &mca_coll_libnbc_component.active_requests,
                                ompi_coll_libnbc_request_t) {
             OPAL_THREAD_UNLOCK(&mca_coll_libnbc_component.lock);
+            long row = request->row_offset;
             res = NBC_Progress(request);
+            if (NBC_CONTINUE == res && request->row_offset != row && libnbc_report_rounds()) {
+                completed++;   /* started a round: not idle (see libnbc_report_rounds) */
+            }
             if( NBC_CONTINUE != res ) {
                 /* done, remove and complete */
                 OPAL_THREAD_LOCK(&mca_coll_libnbc_component.lock);
