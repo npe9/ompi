@@ -110,6 +110,8 @@ void opal_lithe_env_cache_fill(void)
 }
 
 #if OPAL_HAVE_PARLIB_DTLS
+/* liblithe (sched_trace.c); weak so OPAL tools linked without Lithe still load. */
+extern void lithe_context_rank_self(int rank) __attribute__((weak));
 static dtls_key_t opal_proc_local_dtls_key;
 static volatile int opal_proc_local_dtls_ready;
 
@@ -197,6 +199,11 @@ int opal_proc_local_set(opal_proc_t *proc)
     }
     if (opal_proc_local_dtls_ready > 0) {
         set_dtls(opal_proc_local_dtls_key, (NULL == proc) ? &opal_local_proc : proc);
+        /* Tell Lithe which logical rank this context is, for profilers (parlib/tool.h:
+         * hpcrun files each context's profile under it) and the Lithe trace. */
+        if (NULL != proc && NULL != lithe_context_rank_self) {
+            lithe_context_rank_self((int) proc->proc_name.vpid);
+        }
         return OPAL_SUCCESS;
     }
 #endif
@@ -234,6 +241,9 @@ int opal_proc_local_set_name(opal_process_name_t *name)
         }
         proc->proc_name = *name;
         set_dtls(opal_proc_local_dtls_key, proc);
+        if (NULL != lithe_context_rank_self) {   /* see opal_proc_local_set */
+            lithe_context_rank_self((int) name->vpid);
+        }
         if (NULL != opal_proc_local_changed_hook) {
             opal_proc_local_changed_hook();
         }
